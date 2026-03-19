@@ -1138,7 +1138,7 @@ static int file_dialog_save(char *out, int out_size) {
 #else /* Linux */
 
 static int file_dialog_open(char *out, int out_size) {
-    FILE *p = popen("zenity --file-selection 2>/dev/null || kdialog --getopenfilename ~ 2>/dev/null", "r");
+    FILE *p = popen("zenity --file-selection --file-filter='Supported files (*.txt *.md *.ini) | *.txt *.md *.ini' --file-filter='All files (*.*) | *.*' 2>/dev/null || kdialog --getopenfilename ~ '*.txt *.md *.ini | Supported Files' 2>/dev/null", "r");
     if (!p) return -1;
     if (fgets(out, out_size, p)) {
         int len = (int)strlen(out);
@@ -1151,7 +1151,7 @@ static int file_dialog_open(char *out, int out_size) {
 }
 
 static int file_dialog_save(char *out, int out_size) {
-    FILE *p = popen("zenity --file-selection --save 2>/dev/null || kdialog --getsavefilename ~ 2>/dev/null", "r");
+    FILE *p = popen("zenity --file-selection --save --file-filter='Text (*.txt) | *.txt' --file-filter='Markdown (*.md) | *.md' --file-filter='INI (*.ini) | *.ini' --file-filter='All files (*.*) | *.*' 2>/dev/null || kdialog --getsavefilename ~ '*.txt *.md *.ini | Supported Files' 2>/dev/null", "r");
     if (!p) return -1;
     if (fgets(out, out_size, p)) {
         int len = (int)strlen(out);
