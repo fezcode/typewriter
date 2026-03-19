@@ -34,30 +34,38 @@
 #define MAX_PATH_LEN    4096
 #define UNDO_MAX        512
 
-/* Colors (R, G, B) */
-#define COL_PAPER_R   245
-#define COL_PAPER_G   240
-#define COL_PAPER_B   230
+/* ── Colors ────────────────────────────────────────────────────── */
 
-#define COL_TEXT_R    44
-#define COL_TEXT_G    44
-#define COL_TEXT_B    44
+typedef struct {
+    SDL_Color paper;
+    SDL_Color text;
+    SDL_Color cursor;
+    SDL_Color lnum;
+    SDL_Color status_bg;
+    SDL_Color status_fg;
+    SDL_Color sel_bg;
+    SDL_Color notebook_line;
+    SDL_Color notebook_margin;
+} Theme;
 
-#define COL_CURSOR_R  180
-#define COL_CURSOR_G  40
-#define COL_CURSOR_B  40
-
-#define COL_LNUM_R    180
-#define COL_LNUM_G    175
-#define COL_LNUM_B    165
-
-#define COL_STATUS_BG_R  60
-#define COL_STATUS_BG_G  58
-#define COL_STATUS_BG_B  54
-
-#define COL_STATUS_FG_R  210
-#define COL_STATUS_FG_G  205
-#define COL_STATUS_FG_B  195
+static const Theme g_themes[] = {
+    { /* 0: Cream / Classic */
+      { 245, 240, 230, 255 }, { 44, 44, 44, 255 }, { 180, 40, 40, 200 },
+      { 180, 175, 165, 255 }, { 60, 58, 54, 255 }, { 210, 205, 195, 255 },
+      { 180, 210, 230, 255 }, { 195, 215, 230, 255 }, { 220, 140, 140, 180 }
+    },
+    { /* 1: Dark Mode */
+      { 30, 30, 30, 255 }, { 220, 220, 220, 255 }, { 200, 80, 80, 200 },
+      { 100, 100, 100, 255 }, { 45, 45, 45, 255 }, { 180, 180, 180, 255 },
+      { 60, 90, 120, 255 }, { 50, 50, 50, 255 }, { 100, 60, 60, 180 }
+    },
+    { /* 2: Terminal Green */
+      { 10, 10, 10, 255 }, { 50, 200, 50, 255 }, { 50, 200, 50, 200 },
+      { 30, 120, 30, 255 }, { 20, 20, 20, 255 }, { 40, 160, 40, 255 },
+      { 30, 80, 30, 255 }, { 20, 40, 20, 255 }, { 20, 40, 20, 180 }
+    }
+};
+#define THEME_COUNT 3
 
 
 /* ── Line buffer ───────────────────────────────────────────────── */
@@ -125,14 +133,16 @@ typedef struct {
     int sound_enabled;
     int show_line_numbers;
     int show_notebook_lines;
+    int theme_idx;
 } Options;
 
-#define MENU_ITEM_COUNT 3
+#define MENU_ITEM_COUNT 4
 
 static const char *menu_labels[MENU_ITEM_COUNT] = {
     "Sound effects",
     "Line numbers",
     "Notebook lines",
+    "Theme",
 };
 
 /* ── Globals ───────────────────────────────────────────────────── */
@@ -145,7 +155,7 @@ static int           g_char_h;
 static int           g_running = 1;
 static int           g_need_redraw = 1;
 static Doc           g_doc;
-static Options       g_opts = { 1, 1, 0 }; /* sound=on, lnums=on, lines=off */
+static Options       g_opts = { 1, 1, 0, 0 }; /* sound=on, lnums=on, lines=off, theme=cream */
 static int           g_menu_open = 0;
 static int           g_menu_sel  = 0;
 static int           g_quit_dialog = 0; /* save-before-quit dialog */
@@ -774,21 +784,20 @@ static void render(Doc *d) {
     int ww, wh;
     SDL_GetWindowSize(g_win, &ww, &wh);
 
+    int t_idx = clamp(g_opts.theme_idx, 0, THEME_COUNT - 1);
+    const Theme *t = &g_themes[t_idx];
+
     /* Paper background */
-    SDL_SetRenderDrawColor(g_ren, COL_PAPER_R, COL_PAPER_G, COL_PAPER_B, 255);
+    SDL_SetRenderDrawColor(g_ren, t->paper.r, t->paper.g, t->paper.b, 255);
     SDL_RenderClear(g_ren);
 
     int text_x = compute_text_x(d->count);
 
     /* Subtle left margin line */
     if (g_opts.show_line_numbers) {
-        SDL_SetRenderDrawColor(g_ren, 220, 200, 190, 255);
+        SDL_SetRenderDrawColor(g_ren, t->lnum.r, t->lnum.g, t->lnum.b, 100);
         SDL_RenderDrawLine(g_ren, text_x - 10, 0, text_x - 10, wh - 28);
     }
-
-    SDL_Color text_col  = { COL_TEXT_R, COL_TEXT_G, COL_TEXT_B, 255 };
-    SDL_Color lnum_col  = { COL_LNUM_R, COL_LNUM_G, COL_LNUM_B, 255 };
-    SDL_Color sel_col_bg = { 180, 210, 230, 255 };
 
     int vis = doc_visible_lines();
     int sel_r1 = 0, sel_c1 = 0, sel_r2 = 0, sel_c2 = 0;
@@ -797,14 +806,14 @@ static void render(Doc *d) {
 
     /* Notebook lines — draw across the full visible area */
     if (g_opts.show_notebook_lines) {
-        SDL_SetRenderDrawColor(g_ren, 195, 215, 230, 255);
+        SDL_SetRenderDrawColor(g_ren, t->notebook_line.r, t->notebook_line.g, t->notebook_line.b, 255);
         for (int i = 0; i < vis + 1; i++) {
             int ly = MARGIN_TOP + i * g_char_h + g_char_h - 1;
             if (ly < wh - 28)
                 SDL_RenderDrawLine(g_ren, 0, ly, ww, ly);
         }
         /* Red margin line for notebook look */
-        SDL_SetRenderDrawColor(g_ren, 220, 140, 140, 180);
+        SDL_SetRenderDrawColor(g_ren, t->notebook_margin.r, t->notebook_margin.g, t->notebook_margin.b, t->notebook_margin.a);
         int margin_x = text_x - 6;
         SDL_RenderDrawLine(g_ren, margin_x, 0, margin_x, wh - 28);
     }
@@ -821,7 +830,7 @@ static void render(Doc *d) {
             if (digits < 3) digits = 3;
             snprintf(lnum, sizeof(lnum), "%*d", digits, li + 1);
             int lnum_w = (int)strlen(lnum) * g_char_w;
-            render_text(lnum, (int)strlen(lnum), text_x - GUTTER_PAD - lnum_w, y, lnum_col);
+            render_text(lnum, (int)strlen(lnum), text_x - GUTTER_PAD - lnum_w, y, t->lnum);
         }
 
         /* Selection highlight */
@@ -833,14 +842,14 @@ static void render(Doc *d) {
                     text_x + sc * g_char_w, y,
                     (ec - sc) * g_char_w, g_char_h
                 };
-                SDL_SetRenderDrawColor(g_ren, sel_col_bg.r, sel_col_bg.g, sel_col_bg.b, 255);
+                SDL_SetRenderDrawColor(g_ren, t->sel_bg.r, t->sel_bg.g, t->sel_bg.b, 255);
                 SDL_RenderFillRect(g_ren, &hr);
             }
         }
 
         /* Line text */
         if (ln->len > 0)
-            render_text(ln->text, ln->len, text_x, y, text_col);
+            render_text(ln->text, ln->len, text_x, y, t->text);
     }
 
     /* Cursor */
@@ -849,7 +858,7 @@ static void render(Doc *d) {
         int cx_screen = text_x + d->cx * g_char_w;
         int cy_screen = MARGIN_TOP + (d->cy - d->scroll_y) * g_char_h;
         if (d->cy >= d->scroll_y && d->cy < d->scroll_y + vis) {
-            SDL_SetRenderDrawColor(g_ren, COL_CURSOR_R, COL_CURSOR_G, COL_CURSOR_B, 200);
+            SDL_SetRenderDrawColor(g_ren, t->cursor.r, t->cursor.g, t->cursor.b, t->cursor.a);
             SDL_Rect cr = { cx_screen, cy_screen, 2, g_char_h };
             SDL_RenderFillRect(g_ren, &cr);
             /* Underscore style second cursor indicator */
@@ -860,7 +869,7 @@ static void render(Doc *d) {
 
     /* Status bar */
     SDL_Rect sb = { 0, wh - 28, ww, 28 };
-    SDL_SetRenderDrawColor(g_ren, COL_STATUS_BG_R, COL_STATUS_BG_G, COL_STATUS_BG_B, 255);
+    SDL_SetRenderDrawColor(g_ren, t->status_bg.r, t->status_bg.g, t->status_bg.b, 255);
     SDL_RenderFillRect(g_ren, &sb);
 
     char status[512];
@@ -870,8 +879,7 @@ static void render(Doc *d) {
     snprintf(fname_short, sizeof(fname_short), "%.120s", fname);
     snprintf(status, sizeof(status), " %s%s  |  Ln %d, Col %d  |  %d lines  |  Ctrl+K options",
              fname_short, d->dirty ? " *" : "", d->cy + 1, d->cx + 1, d->count);
-    SDL_Color status_col = { COL_STATUS_FG_R, COL_STATUS_FG_G, COL_STATUS_FG_B, 255 };
-    render_text(status, (int)strlen(status), 8, wh - 24, status_col);
+    render_text(status, (int)strlen(status), 8, wh - 24, t->status_fg);
 
     /* ── Options menu overlay ── */
     if (g_menu_open) {
@@ -923,6 +931,7 @@ static void render(Doc *d) {
             &g_opts.sound_enabled,
             &g_opts.show_line_numbers,
             &g_opts.show_notebook_lines,
+            &g_opts.theme_idx,
         };
 
         for (int mi = 0; mi < MENU_ITEM_COUNT; mi++) {
@@ -939,8 +948,13 @@ static void render(Doc *d) {
                 : (SDL_Color){ 190, 185, 175, 255 };
 
             char row[128];
-            snprintf(row, sizeof(row), "[%c] %s",
-                     *opt_ptrs[mi] ? 'x' : ' ', menu_labels[mi]);
+            if (mi == 3) {
+                const char *theme_names[] = { "Classic Cream", "Dark Mode", "Terminal Green" };
+                snprintf(row, sizeof(row), "    %s: %s", menu_labels[mi], theme_names[*opt_ptrs[mi]]);
+            } else {
+                snprintf(row, sizeof(row), "[%c] %s",
+                         *opt_ptrs[mi] ? 'x' : ' ', menu_labels[mi]);
+            }
             render_text(row, (int)strlen(row), panel_x + 20, item_y + 2, item_col);
         }
 
