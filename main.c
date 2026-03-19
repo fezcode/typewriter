@@ -2,15 +2,22 @@
  * typewriter - a lightweight typewriter-style text editor
  *
  * Dependencies: SDL2, SDL2_ttf
- * Build: mkdir build && cd build && cmake .. && cmake --build . --config Release
+ * Build: make  (or)  gcc -O2 main.c -o typewriter $(pkg-config --cflags --libs sdl2 SDL2_ttf) -lm
  */
+
+#define TYPEWRITER_VERSION "0.2.0"
 
 #include <SDL.h>
 #include <SDL_ttf.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
+/* Embedded sound data (PCM float32, 44100Hz, mono) */
+#include "snd_click.h"
+#include "snd_clack.h"
+#include "snd_space.h"
+#include "snd_backspace.h"
+#include "snd_bell.h"
 
 /* ── Configuration ─────────────────────────────────────────────── */
 
@@ -19,9 +26,9 @@
 #define FONT_SIZE       18
 #define TAB_STOP        4
 #define SCROLL_SPEED    3
-#define MARGIN_LEFT     60
+#define MARGIN_LEFT_MIN 20
 #define MARGIN_TOP      50
-#define MARGIN_RIGHT    60
+#define GUTTER_PAD      14  /* pixels between line numbers and text */
 #define CURSOR_BLINK_MS 530
 #define BELL_COLUMN     80
 #define MAX_PATH_LEN    4096
@@ -52,9 +59,6 @@
 #define COL_STATUS_FG_G  205
 #define COL_STATUS_FG_B  195
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 /* ── Line buffer ───────────────────────────────────────────────── */
 
@@ -115,6 +119,22 @@ static SoundBuf snd_backspace;
 
 static SDL_AudioDeviceID audio_dev;
 
+/* ── Options ───────────────────────────────────────────────────── */
+
+typedef struct {
+    int sound_enabled;
+    int show_line_numbers;
+    int show_notebook_lines;
+} Options;
+
+#define MENU_ITEM_COUNT 3
+
+static const char *menu_labels[MENU_ITEM_COUNT] = {
+    "Sound effects",
+    "Line numbers",
+    "Notebook lines",
+};
+
 /* ── Globals ───────────────────────────────────────────────────── */
 
 static SDL_Window   *g_win;
@@ -125,9 +145,15 @@ static int           g_char_h;
 static int           g_running = 1;
 static int           g_need_redraw = 1;
 static Doc           g_doc;
+static Options       g_opts = { 1, 1, 0 }; /* sound=on, lnums=on, lines=off */
+static int           g_menu_open = 0;
+static int           g_menu_sel  = 0;
+static int           g_quit_dialog = 0; /* save-before-quit dialog */
+static int           g_quit_sel    = 0; /* 0=Save, 1=Don't Save, 2=Cancel */
 
 /* ── Forward declarations ──────────────────────────────────────── */
 
+static void doc_grow(Doc *d);
 static void doc_init(Doc *d);
 static void doc_free(Doc *d);
 static void doc_insert_char(Doc *d, char c);
@@ -159,48 +185,29 @@ static int clamp(int v, int lo, int hi) {
 
 static int min_i(int a, int b) { return a < b ? a : b; }
 
-/* ── Sound generation ──────────────────────────────────────────── */
-
-static float randf(void) {
-    return (float)rand() / (float)RAND_MAX * 2.0f - 1.0f;
+/* How many decimal digits in n (at least 1) */
+static int digit_count(int n) {
+    if (n < 0) n = -n;
+    int d = 1;
+    while (n >= 10) { n /= 10; d++; }
+    return d;
 }
 
-static SoundBuf gen_sound(float dur, float freq_lo, float freq_hi,
-                          float attack, float decay, float vol) {
-    SoundBuf sb;
-    sb.len = (int)(dur * SAMPLE_RATE);
-    sb.samples = (float *)xmalloc(sb.len * sizeof(float));
-    for (int i = 0; i < sb.len; i++) {
-        float t = (float)i / SAMPLE_RATE;
-        float env;
-        if (t < attack)
-            env = t / attack;
-        else
-            env = 1.0f - (t - attack) / (dur - attack);
-        if (env < 0.0f) env = 0.0f;
-        env *= env; /* sharper decay */
-
-        /* Mix noise + tone */
-        float noise = randf() * 0.6f;
-        float freq = freq_lo + (freq_hi - freq_lo) * (t / dur);
-        float tone = sinf(2.0f * (float)M_PI * freq * t) * 0.4f;
-        sb.samples[i] = (noise + tone) * env * vol;
-    }
-    return sb;
+/* Compute the left margin (gutter width) based on line count */
+static int compute_text_x(int line_count) {
+    if (!g_opts.show_line_numbers) return MARGIN_LEFT_MIN;
+    int digits = digit_count(line_count);
+    if (digits < 3) digits = 3; /* minimum 3 digits wide */
+    return (digits + 1) * g_char_w + GUTTER_PAD;
 }
 
-static SoundBuf gen_bell_sound(float dur, float freq, float vol) {
+/* ── Sound (embedded PCM data) ─────────────────────────────────── */
+
+static SoundBuf soundbuf_from_embed(const float *data, int len) {
     SoundBuf sb;
-    sb.len = (int)(dur * SAMPLE_RATE);
-    sb.samples = (float *)xmalloc(sb.len * sizeof(float));
-    for (int i = 0; i < sb.len; i++) {
-        float t = (float)i / SAMPLE_RATE;
-        float env = expf(-t * 6.0f);
-        float s = sinf(2.0f * (float)M_PI * freq * t) * 0.6f
-                + sinf(2.0f * (float)M_PI * freq * 2.0f * t) * 0.25f
-                + sinf(2.0f * (float)M_PI * freq * 3.01f * t) * 0.15f;
-        sb.samples[i] = s * env * vol;
-    }
+    sb.len = len;
+    sb.samples = (float *)xmalloc(len * sizeof(float));
+    memcpy(sb.samples, data, len * sizeof(float));
     return sb;
 }
 
@@ -218,15 +225,15 @@ static void sound_init(void) {
         SDL_PauseAudioDevice(audio_dev, 0);
     }
 
-    srand((unsigned)SDL_GetTicks());
-    snd_click     = gen_sound(0.025f, 800, 2000, 0.001f, 0.024f, 0.35f);
-    snd_clack     = gen_sound(0.06f,  300, 600,  0.002f, 0.058f, 0.45f);
-    snd_space     = gen_sound(0.03f,  500, 1200, 0.001f, 0.029f, 0.25f);
-    snd_backspace = gen_sound(0.03f,  600, 1500, 0.001f, 0.029f, 0.30f);
-    snd_bell      = gen_bell_sound(0.3f, 1800.0f, 0.30f);
+    snd_click     = soundbuf_from_embed(snd_embed_click_data,     snd_embed_click_LEN);
+    snd_clack     = soundbuf_from_embed(snd_embed_clack_data,     snd_embed_clack_LEN);
+    snd_space     = soundbuf_from_embed(snd_embed_space_data,     snd_embed_space_LEN);
+    snd_backspace = soundbuf_from_embed(snd_embed_backspace_data, snd_embed_backspace_LEN);
+    snd_bell      = soundbuf_from_embed(snd_embed_bell_data,      snd_embed_bell_LEN);
 }
 
 static void play_sound(SoundBuf *sb) {
+    if (!g_opts.sound_enabled) return;
     if (audio_dev && sb->samples) {
         /* Clear queued audio to avoid latency buildup */
         Uint32 queued = SDL_GetQueuedAudioSize(audio_dev);
@@ -311,10 +318,8 @@ static void undo_pop(Doc *d) {
         Line *ln = &d->lines[e->line];
         int split_at = e->col;
         /* Insert new line */
-        if (d->count + 1 >= d->cap) {
-            d->cap *= 2;
-            d->lines = (Line *)xrealloc(d->lines, d->cap * sizeof(Line));
-        }
+        if (d->count + 1 >= d->cap)
+            doc_grow(d);
         memmove(&d->lines[e->line + 2], &d->lines[e->line + 1],
                 (d->count - e->line - 1) * sizeof(Line));
         d->count++;
@@ -340,10 +345,8 @@ static void undo_pop(Doc *d) {
         break;
     case UNDO_DELETE_LINE:
         /* A line was deleted, re-insert it */
-        if (d->count + 1 >= d->cap) {
-            d->cap *= 2;
-            d->lines = (Line *)xrealloc(d->lines, d->cap * sizeof(Line));
-        }
+        if (d->count + 1 >= d->cap)
+            doc_grow(d);
         memmove(&d->lines[e->line + 1], &d->lines[e->line],
                 (d->count - e->line) * sizeof(Line));
         d->count++;
@@ -380,12 +383,17 @@ static void doc_free(Doc *d) {
     free(d->lines);
 }
 
+static void doc_grow(Doc *d) {
+    int new_cap = d->cap < 1024 ? d->cap * 2 : d->cap + d->cap / 2;
+    if (new_cap <= d->cap) new_cap = d->cap + 1024; /* overflow guard */
+    d->lines = (Line *)xrealloc(d->lines, (size_t)new_cap * sizeof(Line));
+    d->cap = new_cap;
+}
+
 static void doc_ensure_line(Doc *d, int idx) {
     while (d->count <= idx) {
-        if (d->count >= d->cap) {
-            d->cap *= 2;
-            d->lines = (Line *)xrealloc(d->lines, d->cap * sizeof(Line));
-        }
+        if (d->count >= d->cap)
+            doc_grow(d);
         line_init(&d->lines[d->count]);
         d->count++;
     }
@@ -726,9 +734,13 @@ static void render(Doc *d) {
     SDL_SetRenderDrawColor(g_ren, COL_PAPER_R, COL_PAPER_G, COL_PAPER_B, 255);
     SDL_RenderClear(g_ren);
 
+    int text_x = compute_text_x(d->count);
+
     /* Subtle left margin line */
-    SDL_SetRenderDrawColor(g_ren, 220, 200, 190, 255);
-    SDL_RenderDrawLine(g_ren, MARGIN_LEFT - 10, 0, MARGIN_LEFT - 10, wh - 28);
+    if (g_opts.show_line_numbers) {
+        SDL_SetRenderDrawColor(g_ren, 220, 200, 190, 255);
+        SDL_RenderDrawLine(g_ren, text_x - 10, 0, text_x - 10, wh - 28);
+    }
 
     SDL_Color text_col  = { COL_TEXT_R, COL_TEXT_G, COL_TEXT_B, 255 };
     SDL_Color lnum_col  = { COL_LNUM_R, COL_LNUM_G, COL_LNUM_B, 255 };
@@ -739,15 +751,34 @@ static void render(Doc *d) {
     if (d->sel_active)
         sel_get_range(d, &sel_r1, &sel_c1, &sel_r2, &sel_c2);
 
+    /* Notebook lines — draw across the full visible area */
+    if (g_opts.show_notebook_lines) {
+        SDL_SetRenderDrawColor(g_ren, 195, 215, 230, 255);
+        for (int i = 0; i < vis + 1; i++) {
+            int ly = MARGIN_TOP + i * g_char_h + g_char_h - 1;
+            if (ly < wh - 28)
+                SDL_RenderDrawLine(g_ren, 0, ly, ww, ly);
+        }
+        /* Red margin line for notebook look */
+        SDL_SetRenderDrawColor(g_ren, 220, 140, 140, 180);
+        int margin_x = text_x - 6;
+        SDL_RenderDrawLine(g_ren, margin_x, 0, margin_x, wh - 28);
+    }
+
     for (int i = 0; i < vis && d->scroll_y + i < d->count; i++) {
         int li = d->scroll_y + i;
         int y = MARGIN_TOP + i * g_char_h;
         Line *ln = &d->lines[li];
 
-        /* Line number */
-        char lnum[16];
-        snprintf(lnum, sizeof(lnum), "%3d", li + 1);
-        render_text(lnum, (int)strlen(lnum), 8, y, lnum_col);
+        /* Line number — right-aligned in the gutter */
+        if (g_opts.show_line_numbers) {
+            char lnum[32];
+            int digits = digit_count(d->count);
+            if (digits < 3) digits = 3;
+            snprintf(lnum, sizeof(lnum), "%*d", digits, li + 1);
+            int lnum_w = (int)strlen(lnum) * g_char_w;
+            render_text(lnum, (int)strlen(lnum), text_x - GUTTER_PAD - lnum_w, y, lnum_col);
+        }
 
         /* Selection highlight */
         if (d->sel_active && li >= sel_r1 && li <= sel_r2) {
@@ -755,7 +786,7 @@ static void render(Doc *d) {
             int ec = (li == sel_r2) ? sel_c2 : ln->len;
             if (sc < ec) {
                 SDL_Rect hr = {
-                    MARGIN_LEFT + sc * g_char_w, y,
+                    text_x + sc * g_char_w, y,
                     (ec - sc) * g_char_w, g_char_h
                 };
                 SDL_SetRenderDrawColor(g_ren, sel_col_bg.r, sel_col_bg.g, sel_col_bg.b, 255);
@@ -765,13 +796,13 @@ static void render(Doc *d) {
 
         /* Line text */
         if (ln->len > 0)
-            render_text(ln->text, ln->len, MARGIN_LEFT, y, text_col);
+            render_text(ln->text, ln->len, text_x, y, text_col);
     }
 
     /* Cursor */
     Uint32 now = SDL_GetTicks();
     if ((now / CURSOR_BLINK_MS) % 2 == 0) {
-        int cx_screen = MARGIN_LEFT + d->cx * g_char_w;
+        int cx_screen = text_x + d->cx * g_char_w;
         int cy_screen = MARGIN_TOP + (d->cy - d->scroll_y) * g_char_h;
         if (d->cy >= d->scroll_y && d->cy < d->scroll_y + vis) {
             SDL_SetRenderDrawColor(g_ren, COL_CURSOR_R, COL_CURSOR_G, COL_CURSOR_B, 200);
@@ -793,10 +824,134 @@ static void render(Doc *d) {
     const char *fname = d->filepath[0] ? d->filepath : "[untitled]";
     /* Truncate displayed filename to fit status bar */
     snprintf(fname_short, sizeof(fname_short), "%.120s", fname);
-    snprintf(status, sizeof(status), " %s%s  |  Ln %d, Col %d  |  %d lines  |  Ctrl+S save  Ctrl+O open  Ctrl+Q quit",
+    snprintf(status, sizeof(status), " %s%s  |  Ln %d, Col %d  |  %d lines  |  Ctrl+S save  Ctrl+O open  Ctrl+K options  Ctrl+Q quit",
              fname_short, d->dirty ? " *" : "", d->cy + 1, d->cx + 1, d->count);
     SDL_Color status_col = { COL_STATUS_FG_R, COL_STATUS_FG_G, COL_STATUS_FG_B, 255 };
     render_text(status, (int)strlen(status), 8, wh - 24, status_col);
+
+    /* ── Options menu overlay ── */
+    if (g_menu_open) {
+        /* Semi-transparent backdrop */
+        SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 140);
+        SDL_Rect overlay = { 0, 0, ww, wh };
+        SDL_RenderFillRect(g_ren, &overlay);
+
+        /* Menu panel */
+        int panel_w = 380, panel_h = 48 + MENU_ITEM_COUNT * 36 + 40;
+        int panel_x = (ww - panel_w) / 2;
+        int panel_y = (wh - panel_h) / 2;
+
+        /* Panel background */
+        SDL_SetRenderDrawColor(g_ren, 50, 48, 44, 240);
+        SDL_Rect panel = { panel_x, panel_y, panel_w, panel_h };
+        SDL_RenderFillRect(g_ren, &panel);
+
+        /* Panel border */
+        SDL_SetRenderDrawColor(g_ren, 90, 85, 78, 255);
+        SDL_RenderDrawRect(g_ren, &panel);
+
+        /* Title */
+        SDL_Color title_col = { 230, 225, 215, 255 };
+        const char *title = "Options (Ctrl+K)";
+        render_text(title, (int)strlen(title), panel_x + 16, panel_y + 12, title_col);
+
+        /* Separator */
+        SDL_SetRenderDrawColor(g_ren, 80, 76, 70, 255);
+        SDL_RenderDrawLine(g_ren, panel_x + 12, panel_y + 42, panel_x + panel_w - 12, panel_y + 42);
+
+        /* Menu items */
+        int *opt_ptrs[MENU_ITEM_COUNT] = {
+            &g_opts.sound_enabled,
+            &g_opts.show_line_numbers,
+            &g_opts.show_notebook_lines,
+        };
+
+        for (int mi = 0; mi < MENU_ITEM_COUNT; mi++) {
+            int item_y = panel_y + 54 + mi * 36;
+
+            /* Highlight selected row */
+            if (mi == g_menu_sel) {
+                SDL_SetRenderDrawColor(g_ren, 75, 70, 64, 255);
+                SDL_Rect hl = { panel_x + 6, item_y - 2, panel_w - 12, 32 };
+                SDL_RenderFillRect(g_ren, &hl);
+            }
+
+            /* Checkbox */
+            SDL_Color item_col = (mi == g_menu_sel)
+                ? (SDL_Color){ 255, 245, 220, 255 }
+                : (SDL_Color){ 190, 185, 175, 255 };
+
+            char row[128];
+            snprintf(row, sizeof(row), "[%c] %s",
+                     *opt_ptrs[mi] ? 'x' : ' ', menu_labels[mi]);
+            render_text(row, (int)strlen(row), panel_x + 20, item_y + 4, item_col);
+        }
+
+        /* Footer hint */
+        SDL_Color hint_col = { 140, 135, 128, 255 };
+        const char *hint = "Up/Down  Enter=toggle  Esc=close";
+        render_text(hint, (int)strlen(hint), panel_x + 16,
+                    panel_y + panel_h - 24, hint_col);
+
+        SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_NONE);
+    }
+
+    /* ── Save-before-quit dialog ── */
+    if (g_quit_dialog) {
+        SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 160);
+        SDL_Rect overlay = { 0, 0, ww, wh };
+        SDL_RenderFillRect(g_ren, &overlay);
+
+        int qw = 420, qh = 130;
+        int qx = (ww - qw) / 2, qy = (wh - qh) / 2;
+
+        /* Panel */
+        SDL_SetRenderDrawColor(g_ren, 50, 48, 44, 245);
+        SDL_Rect qpanel = { qx, qy, qw, qh };
+        SDL_RenderFillRect(g_ren, &qpanel);
+        SDL_SetRenderDrawColor(g_ren, 90, 85, 78, 255);
+        SDL_RenderDrawRect(g_ren, &qpanel);
+
+        /* Message */
+        SDL_Color msg_col = { 230, 225, 215, 255 };
+        const char *msg = "You have unsaved changes.";
+        render_text(msg, (int)strlen(msg), qx + 20, qy + 16, msg_col);
+
+        /* Buttons */
+        static const char *btn_labels[3] = { "[S]ave", "[D]on't Save", "[C]ancel" };
+        int btn_x = qx + 20;
+        for (int bi = 0; bi < 3; bi++) {
+            int bw = (int)strlen(btn_labels[bi]) * g_char_w + 24;
+            int bh = g_char_h + 16;
+            int by = qy + qh - bh - 18;
+
+            /* Button background */
+            if (bi == g_quit_sel) {
+                SDL_SetRenderDrawColor(g_ren, 100, 95, 85, 255);
+            } else {
+                SDL_SetRenderDrawColor(g_ren, 65, 62, 56, 255);
+            }
+            SDL_Rect brect = { btn_x, by, bw, bh };
+            SDL_RenderFillRect(g_ren, &brect);
+
+            /* Button border */
+            SDL_SetRenderDrawColor(g_ren, 110, 105, 95, 255);
+            SDL_RenderDrawRect(g_ren, &brect);
+
+            /* Button text */
+            SDL_Color bcol = (bi == g_quit_sel)
+                ? (SDL_Color){ 255, 245, 220, 255 }
+                : (SDL_Color){ 180, 175, 165, 255 };
+            render_text(btn_labels[bi], (int)strlen(btn_labels[bi]),
+                        btn_x + 12, by + 8, bcol);
+
+            btn_x += bw + 12;
+        }
+
+        SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_NONE);
+    }
 
     SDL_RenderPresent(g_ren);
     g_need_redraw = 0;
@@ -912,17 +1067,141 @@ static int file_dialog_save(char *out, int out_size) {
 #endif
 }
 
+/* ── Options menu helpers ───────────────────────────────────────── */
+
+static int *menu_opt_ptr(int idx) {
+    switch (idx) {
+    case 0: return &g_opts.sound_enabled;
+    case 1: return &g_opts.show_line_numbers;
+    case 2: return &g_opts.show_notebook_lines;
+    default: return NULL;
+    }
+}
+
+static void menu_toggle(void) {
+    g_menu_open = !g_menu_open;
+    g_need_redraw = 1;
+}
+
+static void handle_menu_key(SDL_KeyboardEvent *ev) {
+    switch (ev->keysym.sym) {
+    case SDLK_UP:
+        g_menu_sel = (g_menu_sel - 1 + MENU_ITEM_COUNT) % MENU_ITEM_COUNT;
+        break;
+    case SDLK_DOWN:
+        g_menu_sel = (g_menu_sel + 1) % MENU_ITEM_COUNT;
+        break;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+    case SDLK_SPACE: {
+        int *p = menu_opt_ptr(g_menu_sel);
+        if (p) *p = !(*p);
+        break;
+    }
+    case SDLK_ESCAPE:
+        g_menu_open = 0;
+        break;
+    default:
+        if ((ev->keysym.mod & KMOD_CTRL) && ev->keysym.sym == SDLK_k)
+            g_menu_open = 0;
+        return;
+    }
+    g_need_redraw = 1;
+}
+
+/* ── Quit dialog ───────────────────────────────────────────────── */
+
+static void try_quit(Doc *d) {
+    if (d->dirty) {
+        g_quit_dialog = 1;
+        g_quit_sel = 0;
+        g_need_redraw = 1;
+    } else {
+        g_running = 0;
+    }
+}
+
+static void handle_quit_key(SDL_KeyboardEvent *ev, Doc *d) {
+    switch (ev->keysym.sym) {
+    case SDLK_LEFT:
+        g_quit_sel = (g_quit_sel - 1 + 3) % 3;
+        break;
+    case SDLK_RIGHT:
+        g_quit_sel = (g_quit_sel + 1) % 3;
+        break;
+    case SDLK_TAB:
+        g_quit_sel = (g_quit_sel + 1) % 3;
+        break;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+        if (g_quit_sel == 0) { /* Save */
+            if (d->filepath[0] == '\0') {
+                char path[MAX_PATH_LEN] = {0};
+                if (file_dialog_save(path, sizeof(path)) == 0)
+                    snprintf(d->filepath, MAX_PATH_LEN, "%s", path);
+            }
+            if (doc_save(d) == 0)
+                g_running = 0;
+            else
+                g_quit_dialog = 0; /* save failed, stay open */
+        } else if (g_quit_sel == 1) { /* Don't Save */
+            g_running = 0;
+        } else { /* Cancel */
+            g_quit_dialog = 0;
+        }
+        break;
+    case SDLK_ESCAPE:
+        g_quit_dialog = 0;
+        break;
+    case SDLK_s:
+        /* Quick shortcut: S = save & quit */
+        if (d->filepath[0] == '\0') {
+            char path[MAX_PATH_LEN] = {0};
+            if (file_dialog_save(path, sizeof(path)) == 0)
+                snprintf(d->filepath, MAX_PATH_LEN, "%s", path);
+        }
+        if (doc_save(d) == 0)
+            g_running = 0;
+        else
+            g_quit_dialog = 0;
+        break;
+    case SDLK_d:
+    case SDLK_n:
+        /* Quick shortcut: D/N = don't save */
+        g_running = 0;
+        break;
+    default:
+        return;
+    }
+    g_need_redraw = 1;
+}
+
 /* ── Input handling ────────────────────────────────────────────── */
 
 static void handle_keydown(SDL_KeyboardEvent *ev, Doc *d) {
+    /* Quit dialog intercepts all input */
+    if (g_quit_dialog) {
+        handle_quit_key(ev, d);
+        return;
+    }
+
+    /* Menu intercepts all input when open */
+    if (g_menu_open) {
+        handle_menu_key(ev);
+        return;
+    }
+
     int ctrl = (ev->keysym.mod & KMOD_CTRL) != 0;
     int shift = (ev->keysym.mod & KMOD_SHIFT) != 0;
 
     /* Ctrl shortcuts */
     if (ctrl) {
         switch (ev->keysym.sym) {
+        case SDLK_k:
+            menu_toggle();
+            return;
         case SDLK_q:
-            g_running = 0;
+            try_quit(d);
             return;
         case SDLK_s:
             if (d->filepath[0] == '\0') {
@@ -1093,6 +1372,7 @@ static void handle_keydown(SDL_KeyboardEvent *ev, Doc *d) {
 }
 
 static void handle_textinput(SDL_TextInputEvent *ev, Doc *d) {
+    if (g_menu_open || g_quit_dialog) return; /* Ignore typing while dialog is open */
     if (d->sel_active) sel_delete(d);
 
     /* Insert each UTF-8 byte (works for ASCII; multi-byte passes through) */
@@ -1110,7 +1390,57 @@ static void handle_textinput(SDL_TextInputEvent *ev, Doc *d) {
 
 /* ── Main ──────────────────────────────────────────────────────── */
 
+static void print_help(const char *prog) {
+    printf("typewriter %s - a lightweight typewriter-style text editor\n\n", TYPEWRITER_VERSION);
+    printf("Usage: %s [options] [file]\n\n", prog);
+    printf("Options:\n");
+    printf("  -h, --help       Show this help message and exit\n");
+    printf("  -v, --version    Show version and exit\n\n");
+    printf("Keyboard shortcuts:\n");
+    printf("  Ctrl+S           Save file\n");
+    printf("  Ctrl+O           Open file\n");
+    printf("  Ctrl+Q           Quit\n");
+    printf("  Ctrl+Z           Undo\n");
+    printf("  Ctrl+C/X/V       Copy / Cut / Paste\n");
+    printf("  Ctrl+A           Select all\n");
+    printf("  Ctrl+K           Open options menu\n\n");
+    printf("Environment:\n");
+    printf("  TYPEWRITER_FONT  Path to a .ttf font file\n\n");
+    printf("You can also drag and drop files onto the window.\n");
+}
+
 int main(int argc, char *argv[]) {
+    /* Parse flags before SDL init (so -h works without a display) */
+    const char *open_file = NULL;
+
+#ifdef _WIN32
+    /* Attach to parent console so printf works when launched from terminal */
+    {
+        extern int __stdcall AttachConsole(unsigned int);
+        extern void *__stdcall GetStdHandle(unsigned long);
+        extern int __stdcall GetFileType(void *);
+        if (AttachConsole((unsigned int)-1)) { /* ATTACH_PARENT_PROCESS */
+            freopen("CONOUT$", "w", stdout);
+            freopen("CONOUT$", "w", stderr);
+        }
+    }
+#endif
+
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+            print_help(argv[0]);
+            return 0;
+        }
+        if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--version") == 0) {
+            printf("typewriter %s\n", TYPEWRITER_VERSION);
+            return 0;
+        }
+        /* First non-flag arg is the file */
+        if (argv[i][0] != '-' && !open_file) {
+            open_file = argv[i];
+        }
+    }
+
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
         fprintf(stderr, "SDL_Init: %s\n", SDL_GetError());
         return 1;
@@ -1129,6 +1459,24 @@ int main(int argc, char *argv[]) {
         fprintf(stderr, "SDL_CreateWindow: %s\n", SDL_GetError());
         TTF_Quit(); SDL_Quit();
         return 1;
+    }
+
+    /* Set window icon from icon.png next to the executable */
+    {
+        const char *base = SDL_GetBasePath();
+        if (base) {
+            char icon_path[MAX_PATH_LEN];
+            snprintf(icon_path, sizeof(icon_path), "%sicon.png", base);
+            SDL_Surface *icon = SDL_LoadBMP(icon_path); /* try BMP first */
+            if (!icon) {
+                /* SDL_image not available; try loading via SDL_RWops trick:
+                   fall back — the .ico in the resource file handles Windows exe icon */
+            }
+            if (icon) {
+                SDL_SetWindowIcon(g_win, icon);
+                SDL_FreeSurface(icon);
+            }
+        }
     }
 
     g_ren = SDL_CreateRenderer(g_win, -1,
@@ -1163,10 +1511,10 @@ int main(int argc, char *argv[]) {
     doc_init(&g_doc);
 
     /* Load file from command line */
-    if (argc > 1) {
-        if (doc_load(&g_doc, argv[1]) != 0) {
-            fprintf(stderr, "warning: could not open '%s', starting empty\n", argv[1]);
-            snprintf(g_doc.filepath, MAX_PATH_LEN, "%s", argv[1]);
+    if (open_file) {
+        if (doc_load(&g_doc, open_file) != 0) {
+            fprintf(stderr, "warning: could not open '%s', starting empty\n", open_file);
+            snprintf(g_doc.filepath, MAX_PATH_LEN, "%s", open_file);
         }
     }
 
@@ -1182,7 +1530,7 @@ int main(int argc, char *argv[]) {
             do {
                 switch (ev.type) {
                 case SDL_QUIT:
-                    g_running = 0;
+                    try_quit(&g_doc);
                     break;
                 case SDL_KEYDOWN:
                     handle_keydown(&ev.key, &g_doc);
