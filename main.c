@@ -824,7 +824,7 @@ static void render(Doc *d) {
     const char *fname = d->filepath[0] ? d->filepath : "[untitled]";
     /* Truncate displayed filename to fit status bar */
     snprintf(fname_short, sizeof(fname_short), "%.120s", fname);
-    snprintf(status, sizeof(status), " %s%s  |  Ln %d, Col %d  |  %d lines  |  Ctrl+S save  Ctrl+O open  Ctrl+K options  Ctrl+Q quit",
+    snprintf(status, sizeof(status), " %s%s  |  Ln %d, Col %d  |  %d lines  |  Ctrl+K options",
              fname_short, d->dirty ? " *" : "", d->cy + 1, d->cx + 1, d->count);
     SDL_Color status_col = { COL_STATUS_FG_R, COL_STATUS_FG_G, COL_STATUS_FG_B, 255 };
     render_text(status, (int)strlen(status), 8, wh - 24, status_col);
@@ -837,8 +837,22 @@ static void render(Doc *d) {
         SDL_Rect overlay = { 0, 0, ww, wh };
         SDL_RenderFillRect(g_ren, &overlay);
 
-        /* Menu panel */
-        int panel_w = 380, panel_h = 48 + MENU_ITEM_COUNT * 36 + 40;
+        /* Shortcuts reference */
+        static const char *shortcut_keys[] = {
+            "Ctrl+S", "Ctrl+O", "Ctrl+Q", "Ctrl+Z",
+            "Ctrl+C", "Ctrl+X", "Ctrl+V", "Ctrl+A",
+        };
+        static const char *shortcut_desc[] = {
+            "Save", "Open", "Quit", "Undo",
+            "Copy", "Cut", "Paste", "Select all",
+        };
+        #define SHORTCUT_COUNT 8
+
+        /* Menu panel — sized to fit options + shortcuts */
+        int opts_h = MENU_ITEM_COUNT * 32;
+        int shorts_h = SHORTCUT_COUNT * 22;
+        int panel_w = 400;
+        int panel_h = 48 + opts_h + 20 + shorts_h + 44;
         int panel_x = (ww - panel_w) / 2;
         int panel_y = (wh - panel_h) / 2;
 
@@ -853,14 +867,14 @@ static void render(Doc *d) {
 
         /* Title */
         SDL_Color title_col = { 230, 225, 215, 255 };
-        const char *title = "Options (Ctrl+K)";
+        const char *title = "Options";
         render_text(title, (int)strlen(title), panel_x + 16, panel_y + 12, title_col);
 
         /* Separator */
         SDL_SetRenderDrawColor(g_ren, 80, 76, 70, 255);
-        SDL_RenderDrawLine(g_ren, panel_x + 12, panel_y + 42, panel_x + panel_w - 12, panel_y + 42);
+        SDL_RenderDrawLine(g_ren, panel_x + 12, panel_y + 40, panel_x + panel_w - 12, panel_y + 40);
 
-        /* Menu items */
+        /* Toggle items */
         int *opt_ptrs[MENU_ITEM_COUNT] = {
             &g_opts.sound_enabled,
             &g_opts.show_line_numbers,
@@ -868,16 +882,14 @@ static void render(Doc *d) {
         };
 
         for (int mi = 0; mi < MENU_ITEM_COUNT; mi++) {
-            int item_y = panel_y + 54 + mi * 36;
+            int item_y = panel_y + 50 + mi * 32;
 
-            /* Highlight selected row */
             if (mi == g_menu_sel) {
                 SDL_SetRenderDrawColor(g_ren, 75, 70, 64, 255);
-                SDL_Rect hl = { panel_x + 6, item_y - 2, panel_w - 12, 32 };
+                SDL_Rect hl = { panel_x + 6, item_y - 2, panel_w - 12, 28 };
                 SDL_RenderFillRect(g_ren, &hl);
             }
 
-            /* Checkbox */
             SDL_Color item_col = (mi == g_menu_sel)
                 ? (SDL_Color){ 255, 245, 220, 255 }
                 : (SDL_Color){ 190, 185, 175, 255 };
@@ -885,7 +897,26 @@ static void render(Doc *d) {
             char row[128];
             snprintf(row, sizeof(row), "[%c] %s",
                      *opt_ptrs[mi] ? 'x' : ' ', menu_labels[mi]);
-            render_text(row, (int)strlen(row), panel_x + 20, item_y + 4, item_col);
+            render_text(row, (int)strlen(row), panel_x + 20, item_y + 2, item_col);
+        }
+
+        /* Shortcuts section */
+        int sc_top = panel_y + 50 + opts_h + 8;
+        SDL_SetRenderDrawColor(g_ren, 80, 76, 70, 255);
+        SDL_RenderDrawLine(g_ren, panel_x + 12, sc_top, panel_x + panel_w - 12, sc_top);
+
+        SDL_Color sc_title_col = { 200, 195, 185, 255 };
+        const char *sc_title = "Keyboard Shortcuts";
+        render_text(sc_title, (int)strlen(sc_title), panel_x + 16, sc_top + 6, sc_title_col);
+
+        SDL_Color sc_key_col  = { 180, 175, 165, 255 };
+        SDL_Color sc_desc_col = { 145, 140, 132, 255 };
+        for (int si = 0; si < SHORTCUT_COUNT; si++) {
+            int sy = sc_top + 28 + si * 22;
+            render_text(shortcut_keys[si], (int)strlen(shortcut_keys[si]),
+                        panel_x + 24, sy, sc_key_col);
+            render_text(shortcut_desc[si], (int)strlen(shortcut_desc[si]),
+                        panel_x + 24 + 10 * g_char_w, sy, sc_desc_col);
         }
 
         /* Footer hint */
@@ -983,25 +1014,44 @@ static void clipboard_paste(Doc *d) {
     play_sound(&snd_click);
 }
 
-/* ── Simple file dialog (native on each platform via zenity/powershell/osascript) */
+/* ── Native file dialogs ───────────────────────────────────────── */
+
+#ifdef _WIN32
+#include <windows.h>
+#include <commdlg.h>
 
 static int file_dialog_open(char *out, int out_size) {
-#ifdef _WIN32
-    /* Use PowerShell for file open dialog */
-    FILE *p = _popen("powershell -Command \"Add-Type -AssemblyName System.Windows.Forms; "
-                     "$f = New-Object System.Windows.Forms.OpenFileDialog; "
-                     "$f.Filter = 'Text files|*.txt|All files|*.*'; "
-                     "if($f.ShowDialog() -eq 'OK'){$f.FileName}\"", "r");
-    if (!p) return -1;
-    if (fgets(out, out_size, p)) {
-        int len = (int)strlen(out);
-        while (len > 0 && (out[len-1] == '\n' || out[len-1] == '\r')) out[--len] = '\0';
-        _pclose(p);
-        return len > 0 ? 0 : -1;
-    }
-    _pclose(p);
-    return -1;
+    OPENFILENAMEA ofn;
+    memset(&ofn, 0, sizeof(ofn));
+    memset(out, 0, out_size);
+    ofn.lStructSize  = sizeof(ofn);
+    ofn.hwndOwner    = NULL;
+    ofn.lpstrFilter  = "Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile    = out;
+    ofn.nMaxFile     = out_size;
+    ofn.Flags        = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    ofn.lpstrTitle   = "Open File";
+    return GetOpenFileNameA(&ofn) ? 0 : -1;
+}
+
+static int file_dialog_save(char *out, int out_size) {
+    OPENFILENAMEA ofn;
+    memset(&ofn, 0, sizeof(ofn));
+    memset(out, 0, out_size);
+    ofn.lStructSize  = sizeof(ofn);
+    ofn.hwndOwner    = NULL;
+    ofn.lpstrFilter  = "Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFile    = out;
+    ofn.nMaxFile     = out_size;
+    ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
+    ofn.lpstrDefExt  = "txt";
+    ofn.lpstrTitle   = "Save File";
+    return GetSaveFileNameA(&ofn) ? 0 : -1;
+}
+
 #elif __APPLE__
+
+static int file_dialog_open(char *out, int out_size) {
     FILE *p = popen("osascript -e 'POSIX path of (choose file)' 2>/dev/null", "r");
     if (!p) return -1;
     if (fgets(out, out_size, p)) {
@@ -1012,37 +1062,9 @@ static int file_dialog_open(char *out, int out_size) {
     }
     pclose(p);
     return -1;
-#else
-    /* Try zenity, then kdialog */
-    FILE *p = popen("zenity --file-selection 2>/dev/null || kdialog --getopenfilename ~ 2>/dev/null", "r");
-    if (!p) return -1;
-    if (fgets(out, out_size, p)) {
-        int len = (int)strlen(out);
-        while (len > 0 && (out[len-1] == '\n' || out[len-1] == '\r')) out[--len] = '\0';
-        pclose(p);
-        return len > 0 ? 0 : -1;
-    }
-    pclose(p);
-    return -1;
-#endif
 }
 
 static int file_dialog_save(char *out, int out_size) {
-#ifdef _WIN32
-    FILE *p = _popen("powershell -Command \"Add-Type -AssemblyName System.Windows.Forms; "
-                     "$f = New-Object System.Windows.Forms.SaveFileDialog; "
-                     "$f.Filter = 'Text files|*.txt|All files|*.*'; "
-                     "if($f.ShowDialog() -eq 'OK'){$f.FileName}\"", "r");
-    if (!p) return -1;
-    if (fgets(out, out_size, p)) {
-        int len = (int)strlen(out);
-        while (len > 0 && (out[len-1] == '\n' || out[len-1] == '\r')) out[--len] = '\0';
-        _pclose(p);
-        return len > 0 ? 0 : -1;
-    }
-    _pclose(p);
-    return -1;
-#elif __APPLE__
     FILE *p = popen("osascript -e 'POSIX path of (choose file name)' 2>/dev/null", "r");
     if (!p) return -1;
     if (fgets(out, out_size, p)) {
@@ -1053,7 +1075,24 @@ static int file_dialog_save(char *out, int out_size) {
     }
     pclose(p);
     return -1;
-#else
+}
+
+#else /* Linux */
+
+static int file_dialog_open(char *out, int out_size) {
+    FILE *p = popen("zenity --file-selection 2>/dev/null || kdialog --getopenfilename ~ 2>/dev/null", "r");
+    if (!p) return -1;
+    if (fgets(out, out_size, p)) {
+        int len = (int)strlen(out);
+        while (len > 0 && (out[len-1] == '\n' || out[len-1] == '\r')) out[--len] = '\0';
+        pclose(p);
+        return len > 0 ? 0 : -1;
+    }
+    pclose(p);
+    return -1;
+}
+
+static int file_dialog_save(char *out, int out_size) {
     FILE *p = popen("zenity --file-selection --save 2>/dev/null || kdialog --getsavefilename ~ 2>/dev/null", "r");
     if (!p) return -1;
     if (fgets(out, out_size, p)) {
@@ -1064,8 +1103,9 @@ static int file_dialog_save(char *out, int out_size) {
     }
     pclose(p);
     return -1;
-#endif
 }
+
+#endif
 
 /* ── Options menu helpers ───────────────────────────────────────── */
 
@@ -1415,14 +1455,9 @@ int main(int argc, char *argv[]) {
 
 #ifdef _WIN32
     /* Attach to parent console so printf works when launched from terminal */
-    {
-        extern int __stdcall AttachConsole(unsigned int);
-        extern void *__stdcall GetStdHandle(unsigned long);
-        extern int __stdcall GetFileType(void *);
-        if (AttachConsole((unsigned int)-1)) { /* ATTACH_PARENT_PROCESS */
-            freopen("CONOUT$", "w", stdout);
-            freopen("CONOUT$", "w", stderr);
-        }
+    if (AttachConsole(ATTACH_PARENT_PROCESS)) {
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
     }
 #endif
 

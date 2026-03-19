@@ -21,7 +21,7 @@ RES    =
 
 ifeq ($(OS),Windows_NT)
   TARGET = typewriter.exe
-  LDFLAGS += -mwindows
+  LDFLAGS += -mwindows -lcomdlg32
   RES = typewriter_res.o
 endif
 
