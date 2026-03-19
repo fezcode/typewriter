@@ -1293,8 +1293,19 @@ static int *menu_opt_ptr(int idx) {
     }
 }
 
+static void menu_toggle(void);
+
+static void update_text_input_state(void) {
+    if (g_quit_dialog || g_menu_open) {
+        SDL_StopTextInput();
+    } else {
+        SDL_StartTextInput();
+    }
+}
+
 static void menu_toggle(void) {
     g_menu_open = !g_menu_open;
+    update_text_input_state();
     g_need_redraw = 1;
 }
 
@@ -1350,6 +1361,7 @@ static void try_quit(Doc *d) {
     if (d->dirty) {
         g_quit_dialog = 1;
         g_quit_sel = 0;
+        update_text_input_state();
         g_need_redraw = 1;
     } else {
         g_running = 0;
@@ -1377,16 +1389,20 @@ static void handle_quit_key(SDL_KeyboardEvent *ev, Doc *d) {
             }
             if (doc_save(d) == 0)
                 g_running = 0;
-            else
+            else {
                 g_quit_dialog = 0; /* save failed, stay open */
+                update_text_input_state();
+            }
         } else if (g_quit_sel == 1) { /* Don't Save */
             g_running = 0;
         } else { /* Cancel */
             g_quit_dialog = 0;
+            update_text_input_state();
         }
         break;
     case SDLK_ESCAPE:
         g_quit_dialog = 0;
+        update_text_input_state();
         break;
     case SDLK_s:
         /* Quick shortcut: S = save & quit */
@@ -1397,8 +1413,10 @@ static void handle_quit_key(SDL_KeyboardEvent *ev, Doc *d) {
         }
         if (doc_save(d) == 0)
             g_running = 0;
-        else
+        else {
             g_quit_dialog = 0;
+            update_text_input_state();
+        }
         break;
     case SDLK_d:
     case SDLK_n:
@@ -1408,6 +1426,7 @@ static void handle_quit_key(SDL_KeyboardEvent *ev, Doc *d) {
     case SDLK_c:
         /* Quick shortcut: C = cancel */
         g_quit_dialog = 0;
+        update_text_input_state();
         break;
     default:
         return;
