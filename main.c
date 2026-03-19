@@ -360,7 +360,6 @@ static void undo_pop(Doc *d) {
     } break;
     case UNDO_JOIN_LINES: {
         /* Lines were joined, split them back */
-        Line *ln = &d->lines[e->line];
         int split_at = e->col;
         /* Insert new line */
         if (d->count + 1 >= d->cap)
@@ -368,6 +367,7 @@ static void undo_pop(Doc *d) {
         memmove(&d->lines[e->line + 2], &d->lines[e->line + 1],
                 (d->count - e->line - 1) * sizeof(Line));
         d->count++;
+        Line *ln = &d->lines[e->line];
         Line *newln = &d->lines[e->line + 1];
         int tail = ln->len - split_at;
         newln->cap = tail > 16 ? tail * 2 : 16;
@@ -528,21 +528,20 @@ static void doc_delete_forward(Doc *d) {
 
 static void doc_insert_newline(Doc *d) {
     doc_ensure_line(d, d->cy);
-    Line *ln = &d->lines[d->cy];
-    d->cx = clamp(d->cx, 0, ln->len);
+    d->cx = clamp(d->cx, 0, d->lines[d->cy].len);
 
     undo_push(UNDO_SPLIT_LINE, d->cy, d->cx, 0, NULL);
 
     /* Make room for new line */
     if (d->count + 1 >= d->cap) {
-        d->cap *= 2;
-        d->lines = (Line *)xrealloc(d->lines, d->cap * sizeof(Line));
+        doc_grow(d);
     }
     memmove(&d->lines[d->cy + 2], &d->lines[d->cy + 1],
             (d->count - d->cy - 1) * sizeof(Line));
     d->count++;
 
     /* Split text */
+    Line *ln = &d->lines[d->cy];
     Line *newln = &d->lines[d->cy + 1];
     int tail = ln->len - d->cx;
     newln->cap = tail > 16 ? tail * 2 : 16;
