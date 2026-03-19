@@ -82,6 +82,7 @@ typedef struct {
     int   cap;
     int   cx, cy;       /* cursor col, row */
     int   scroll_y;     /* first visible line */
+    int   scroll_x;     /* first visible column */
     int   sel_active;
     int   sel_ax, sel_ay; /* selection anchor */
     int   dirty;
@@ -578,11 +579,24 @@ static int doc_visible_lines(void) {
 }
 
 static void doc_scroll_to_cursor(Doc *d) {
-    int vis = doc_visible_lines();
+    int ww, wh;
+    SDL_GetWindowSize(g_win, &ww, &wh);
+    int vis_y = doc_visible_lines();
+    int text_x = compute_text_x(d->count);
+    int vis_x = (ww - text_x - MARGIN_LEFT_MIN) / g_char_w;
+    if (vis_x < 1) vis_x = 1;
+
+    /* Vertical scroll */
     if (d->cy < d->scroll_y)
         d->scroll_y = d->cy;
-    else if (d->cy >= d->scroll_y + vis)
-        d->scroll_y = d->cy - vis + 1;
+    else if (d->cy >= d->scroll_y + vis_y)
+        d->scroll_y = d->cy - vis_y + 1;
+
+    /* Horizontal scroll */
+    if (d->cx < d->scroll_x)
+        d->scroll_x = d->cx;
+    else if (d->cx >= d->scroll_x + vis_x)
+        d->scroll_x = d->cx - vis_x + 1;
 }
 
 static int doc_load(Doc *d, const char *path) {
@@ -843,6 +857,15 @@ static void render(Doc *d) {
         if (d->sel_active && li >= sel_r1 && li <= sel_r2) {
             int sc = (li == sel_r1) ? sel_c1 : 0;
             int ec = (li == sel_r2) ? sel_c2 : ln->len;
+            
+            /* Apply scroll offset */
+            sc -= d->scroll_x;
+            ec -= d->scroll_x;
+            
+            /* Clamp to visible area */
+            if (sc < 0) sc = 0;
+            if (ec > (ww - text_x) / g_char_w) ec = (ww - text_x) / g_char_w;
+
             if (sc < ec) {
                 SDL_Rect hr = {
                     text_x + sc * g_char_w, y,
@@ -853,23 +876,37 @@ static void render(Doc *d) {
             }
         }
 
-        /* Line text */
-        if (ln->len > 0)
-            render_text(ln->text, ln->len, text_x, y, t->text);
+        /* Line text with horizontal scroll and clipping */
+        if (ln->len > d->scroll_x) {
+            int start_col = d->scroll_x;
+            int len = ln->len - start_col;
+            int max_vis_chars = (ww - text_x) / g_char_w;
+            if (len > max_vis_chars) len = max_vis_chars;
+            
+            if (len > 0)
+                render_text(&ln->text[start_col], len, text_x, y, t->text);
+        }
     }
 
     /* Cursor */
     Uint32 now = SDL_GetTicks();
     if ((now / CURSOR_BLINK_MS) % 2 == 0) {
-        int cx_screen = text_x + d->cx * g_char_w;
+        int cx_rel = d->cx - d->scroll_x;
+        int cx_screen = text_x + cx_rel * g_char_w;
         int cy_screen = MARGIN_TOP + (d->cy - d->scroll_y) * g_char_h;
-        if (d->cy >= d->scroll_y && d->cy < d->scroll_y + vis) {
+        
+        int vis_chars = (ww - text_x) / g_char_w;
+
+        if (d->cy >= d->scroll_y && d->cy < d->scroll_y + vis &&
+            cx_rel >= 0 && cx_rel <= vis_chars) {
             SDL_SetRenderDrawColor(g_ren, t->cursor.r, t->cursor.g, t->cursor.b, t->cursor.a);
             SDL_Rect cr = { cx_screen, cy_screen, 2, g_char_h };
             SDL_RenderFillRect(g_ren, &cr);
             /* Underscore style second cursor indicator */
-            SDL_Rect ul = { cx_screen, cy_screen + g_char_h - 2, g_char_w, 2 };
-            SDL_RenderFillRect(g_ren, &ul);
+            if (cx_rel < vis_chars) {
+                SDL_Rect ul = { cx_screen, cy_screen + g_char_h - 2, g_char_w, 2 };
+                SDL_RenderFillRect(g_ren, &ul);
+            }
         }
     }
 
