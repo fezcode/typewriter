@@ -1209,6 +1209,7 @@ static int *menu_opt_ptr(int idx) {
     case 0: return &g_opts.sound_enabled;
     case 1: return &g_opts.show_line_numbers;
     case 2: return &g_opts.show_notebook_lines;
+    case 3: return &g_opts.theme_idx;
     default: return NULL;
     }
 }
@@ -1226,13 +1227,30 @@ static void handle_menu_key(SDL_KeyboardEvent *ev) {
     case SDLK_DOWN:
         g_menu_sel = (g_menu_sel + 1) % MENU_ITEM_COUNT;
         break;
+    case SDLK_RIGHT:
+        if (g_menu_sel == 3) {
+            g_opts.theme_idx = (g_opts.theme_idx + 1) % THEME_COUNT;
+            settings_save();
+        }
+        break;
+    case SDLK_LEFT:
+        if (g_menu_sel == 3) {
+            g_opts.theme_idx = (g_opts.theme_idx - 1 + THEME_COUNT) % THEME_COUNT;
+            settings_save();
+        }
+        break;
     case SDLK_RETURN:
     case SDLK_KP_ENTER:
     case SDLK_SPACE: {
-        int *p = menu_opt_ptr(g_menu_sel);
-        if (p) {
-            *p = !(*p);
+        if (g_menu_sel == 3) {
+            g_opts.theme_idx = (g_opts.theme_idx + 1) % THEME_COUNT;
             settings_save();
+        } else {
+            int *p = menu_opt_ptr(g_menu_sel);
+            if (p) {
+                *p = !(*p);
+                settings_save();
+            }
         }
         break;
     }
