@@ -1001,7 +1001,7 @@ static void render(Doc *d) {
         SDL_Rect overlay = { 0, 0, ww, wh };
         SDL_RenderFillRect(g_ren, &overlay);
 
-        int fw = 480, fh = 140;
+        int fw = 510, fh = 140;
         int fx = (ww - fw) / 2, fy = (wh - fh) / 2;
 
         /* Panel */
