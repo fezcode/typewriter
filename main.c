@@ -161,6 +161,12 @@ static int           g_menu_sel  = 0;
 static int           g_quit_dialog = 0; /* save-before-quit dialog */
 static int           g_quit_sel    = 0; /* 0=Save, 1=Don't Save, 2=Cancel */
 
+/* Find/Replace state */
+static int           g_find_dialog = 0;
+static char          g_find_text[256] = {0};
+static char          g_replace_text[256] = {0};
+static int           g_find_focus = 0; /* 0 = Find input, 1 = Replace input */
+
 /* ── Forward declarations ──────────────────────────────────────── */
 
 static void doc_grow(Doc *d);
@@ -986,6 +992,72 @@ static void render(Doc *d) {
         SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_NONE);
     }
 
+    /* ── Find/Replace dialog ── */
+    if (g_find_dialog) {
+        SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(g_ren, 0, 0, 0, 140);
+        SDL_Rect overlay = { 0, 0, ww, wh };
+        SDL_RenderFillRect(g_ren, &overlay);
+
+        int fw = 400, fh = 140;
+        int fx = (ww - fw) / 2, fy = (wh - fh) / 2;
+
+        /* Panel */
+        SDL_SetRenderDrawColor(g_ren, 50, 48, 44, 245);
+        SDL_Rect fpanel = { fx, fy, fw, fh };
+        SDL_RenderFillRect(g_ren, &fpanel);
+        SDL_SetRenderDrawColor(g_ren, 90, 85, 78, 255);
+        SDL_RenderDrawRect(g_ren, &fpanel);
+
+        /* Labels and Inputs */
+        SDL_Color label_col = { 200, 195, 185, 255 };
+        SDL_Color text_col = { 255, 245, 220, 255 };
+        
+        render_text("Find:", 5, fx + 20, fy + 20, label_col);
+        render_text("Replace:", 8, fx + 20, fy + 60, label_col);
+
+        /* Input boxes */
+        SDL_Rect box1 = { fx + 100, fy + 16, fw - 120, g_char_h + 8 };
+        SDL_Rect box2 = { fx + 100, fy + 56, fw - 120, g_char_h + 8 };
+        
+        SDL_SetRenderDrawColor(g_ren, 30, 28, 26, 255);
+        SDL_RenderFillRect(g_ren, &box1);
+        SDL_RenderFillRect(g_ren, &box2);
+        
+        if (g_find_focus == 0) {
+            SDL_SetRenderDrawColor(g_ren, 180, 210, 230, 255);
+            SDL_RenderDrawRect(g_ren, &box1);
+        } else {
+            SDL_SetRenderDrawColor(g_ren, 180, 210, 230, 255);
+            SDL_RenderDrawRect(g_ren, &box2);
+        }
+
+        render_text(g_find_text, (int)strlen(g_find_text), box1.x + 4, box1.y + 4, text_col);
+        render_text(g_replace_text, (int)strlen(g_replace_text), box2.x + 4, box2.y + 4, text_col);
+
+        /* Cursor in focused box */
+        Uint32 now = SDL_GetTicks();
+        if ((now / CURSOR_BLINK_MS) % 2 == 0) {
+            SDL_SetRenderDrawColor(g_ren, 200, 200, 200, 255);
+            if (g_find_focus == 0) {
+                int cw = (int)strlen(g_find_text) * g_char_w;
+                SDL_Rect cr = { box1.x + 4 + cw, box1.y + 4, 2, g_char_h };
+                SDL_RenderFillRect(g_ren, &cr);
+            } else {
+                int cw = (int)strlen(g_replace_text) * g_char_w;
+                SDL_Rect cr = { box2.x + 4 + cw, box2.y + 4, 2, g_char_h };
+                SDL_RenderFillRect(g_ren, &cr);
+            }
+        }
+
+        /* Footer hint */
+        SDL_Color hint_col = { 140, 135, 128, 255 };
+        const char *hint = "Tab=switch  Enter=find  Shift+Enter=replace";
+        render_text(hint, (int)strlen(hint), fx + 16, fy + fh - 24, hint_col);
+
+        SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_NONE);
+    }
+
     /* ── Save-before-quit dialog ── */
     if (g_quit_dialog) {
         SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_BLEND);
@@ -1337,12 +1409,118 @@ static void handle_quit_key(SDL_KeyboardEvent *ev, Doc *d) {
     g_need_redraw = 1;
 }
 
+/* ── Find/Replace dialog ───────────────────────────────────────── */
+
+static void find_next(Doc *d) {
+    if (g_find_text[0] == '\0') return;
+    int start_y = d->cy;
+    int start_x = d->cx;
+    int len = (int)strlen(g_find_text);
+
+    for (int y = start_y; y < d->count; y++) {
+        Line *ln = &d->lines[y];
+        int search_x = (y == start_y) ? start_x : 0;
+        
+        /* Simple substring search */
+        for (int x = search_x; x <= ln->len - len; x++) {
+            if (strncmp(&ln->text[x], g_find_text, len) == 0) {
+                /* Match found */
+                d->cy = y;
+                d->cx = x + len;
+                d->sel_active = 1;
+                d->sel_ay = y;
+                d->sel_ax = x;
+                doc_scroll_to_cursor(d);
+                g_need_redraw = 1;
+                return;
+            }
+        }
+    }
+    /* Wrap around */
+    for (int y = 0; y <= start_y; y++) {
+        Line *ln = &d->lines[y];
+        int end_x = (y == start_y) ? start_x : ln->len - len;
+        
+        for (int x = 0; x <= end_x; x++) {
+            if (strncmp(&ln->text[x], g_find_text, len) == 0) {
+                d->cy = y;
+                d->cx = x + len;
+                d->sel_active = 1;
+                d->sel_ay = y;
+                d->sel_ax = x;
+                doc_scroll_to_cursor(d);
+                g_need_redraw = 1;
+                return;
+            }
+        }
+    }
+}
+
+static void replace_current(Doc *d) {
+    if (!d->sel_active) {
+        find_next(d);
+        return;
+    }
+    
+    int r1, c1, r2, c2;
+    sel_get_range(d, &r1, &c1, &r2, &c2);
+    
+    /* Check if current selection matches find text */
+    if (r1 == r2 && (c2 - c1) == (int)strlen(g_find_text) &&
+        strncmp(&d->lines[r1].text[c1], g_find_text, c2 - c1) == 0) {
+        
+        /* Delete selection and insert replacement */
+        sel_delete(d);
+        for (int i = 0; g_replace_text[i]; i++) {
+            doc_insert_char(d, g_replace_text[i]);
+        }
+    }
+    find_next(d);
+}
+
+static void handle_find_key(SDL_KeyboardEvent *ev, Doc *d) {
+    switch (ev->keysym.sym) {
+    case SDLK_ESCAPE:
+        g_find_dialog = 0;
+        break;
+    case SDLK_TAB:
+        g_find_focus = !g_find_focus;
+        break;
+    case SDLK_RETURN:
+    case SDLK_KP_ENTER:
+        if ((ev->keysym.mod & KMOD_SHIFT) != 0) {
+            replace_current(d);
+        } else {
+            find_next(d);
+        }
+        break;
+    case SDLK_BACKSPACE: {
+        char *buf = g_find_focus == 0 ? g_find_text : g_replace_text;
+        int len = (int)strlen(buf);
+        if (len > 0) buf[len - 1] = '\0';
+        break;
+    }
+    case SDLK_f:
+        if ((ev->keysym.mod & KMOD_CTRL) != 0) {
+            g_find_dialog = 0; /* Close on Ctrl+F again */
+        }
+        break;
+    }
+    g_need_redraw = 1;
+}
+
 /* ── Input handling ────────────────────────────────────────────── */
 
 static void handle_keydown(SDL_KeyboardEvent *ev, Doc *d) {
     /* Quit dialog intercepts all input */
     if (g_quit_dialog) {
         handle_quit_key(ev, d);
+        return;
+    }
+
+    /* Find dialog intercepts all input */
+    if (g_find_dialog) {
+        handle_find_key(ev, d);
         return;
     }
 
@@ -1358,6 +1536,11 @@ static void handle_keydown(SDL_KeyboardEvent *ev, Doc *d) {
     /* Ctrl shortcuts */
     if (ctrl) {
         switch (ev->keysym.sym) {
+        case SDLK_f:
+            g_find_dialog = 1;
+            g_find_focus = 0;
+            g_need_redraw = 1;
+            return;
         case SDLK_k:
             menu_toggle();
             return;
@@ -1533,7 +1716,19 @@ static void handle_keydown(SDL_KeyboardEvent *ev, Doc *d) {
 }
 
 static void handle_textinput(SDL_TextInputEvent *ev, Doc *d) {
-    if (g_menu_open || g_quit_dialog) return; /* Ignore typing while dialog is open */
+    if (g_quit_dialog || g_menu_open) return; /* Ignore typing while menu/quit dialog is open */
+    
+    if (g_find_dialog) {
+        char *buf = g_find_focus == 0 ? g_find_text : g_replace_text;
+        int len = (int)strlen(buf);
+        int added = (int)strlen(ev->text);
+        if (len + added < 255) {
+            strcat(buf, ev->text);
+        }
+        g_need_redraw = 1;
+        return;
+    }
+
     if (d->sel_active) sel_delete(d);
 
     /* Insert each UTF-8 byte (works for ASCII; multi-byte passes through) */
