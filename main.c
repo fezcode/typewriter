@@ -1178,6 +1178,7 @@ static void settings_save(void) {
     fprintf(f, "sound_enabled=%d\n", g_opts.sound_enabled);
     fprintf(f, "show_line_numbers=%d\n", g_opts.show_line_numbers);
     fprintf(f, "show_notebook_lines=%d\n", g_opts.show_notebook_lines);
+    fprintf(f, "theme_idx=%d\n", g_opts.theme_idx);
     fclose(f);
 }
 
@@ -1200,6 +1201,10 @@ static void settings_load(void) {
         if (sscanf(line, "sound_enabled=%d", &val) == 1) g_opts.sound_enabled = val;
         else if (sscanf(line, "show_line_numbers=%d", &val) == 1) g_opts.show_line_numbers = val;
         else if (sscanf(line, "show_notebook_lines=%d", &val) == 1) g_opts.show_notebook_lines = val;
+        else if (sscanf(line, "theme_idx=%d", &val) == 1) {
+            g_opts.theme_idx = val;
+            if (g_opts.theme_idx < 0 || g_opts.theme_idx >= THEME_COUNT) g_opts.theme_idx = 0;
+        }
     }
     fclose(f);
 }
