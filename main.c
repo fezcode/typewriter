@@ -1405,6 +1405,10 @@ static void handle_quit_key(SDL_KeyboardEvent *ev, Doc *d) {
         /* Quick shortcut: D/N = don't save */
         g_running = 0;
         break;
+    case SDLK_c:
+        /* Quick shortcut: C = cancel */
+        g_quit_dialog = 0;
+        break;
     default:
         return;
     }
@@ -1761,6 +1765,7 @@ static void print_help(const char *prog) {
     printf("  Ctrl+Z           Undo\n");
     printf("  Ctrl+C/X/V       Copy / Cut / Paste\n");
     printf("  Ctrl+A           Select all\n");
+    printf("  Ctrl+F           Find & Replace\n");
     printf("  Ctrl+K           Open options menu\n\n");
     printf("Environment:\n");
     printf("  TYPEWRITER_FONT  Path to a .ttf font file\n\n");
