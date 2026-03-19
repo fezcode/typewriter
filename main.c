@@ -1084,7 +1084,7 @@ static int file_dialog_open(char *out, int out_size) {
     memset(out, 0, out_size);
     ofn.lStructSize  = sizeof(ofn);
     ofn.hwndOwner    = NULL;
-    ofn.lpstrFilter  = "Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFilter  = "Supported Files (*.txt;*.md;*.ini)\0*.txt;*.md;*.ini\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile    = out;
     ofn.nMaxFile     = out_size;
     ofn.Flags        = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
@@ -1098,7 +1098,7 @@ static int file_dialog_save(char *out, int out_size) {
     memset(out, 0, out_size);
     ofn.lStructSize  = sizeof(ofn);
     ofn.hwndOwner    = NULL;
-    ofn.lpstrFilter  = "Text Files (*.txt)\0*.txt\0All Files (*.*)\0*.*\0";
+    ofn.lpstrFilter  = "Text Files (*.txt)\0*.txt\0Markdown (*.md)\0*.md\0INI (*.ini)\0*.ini\0All Files (*.*)\0*.*\0";
     ofn.lpstrFile    = out;
     ofn.nMaxFile     = out_size;
     ofn.Flags        = OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR;
