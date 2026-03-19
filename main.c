@@ -211,12 +211,51 @@ static SoundBuf soundbuf_from_embed(const float *data, int len) {
     return sb;
 }
 
+#define MAX_CONCURRENT_SOUNDS 32
+
+typedef struct {
+    float *samples;
+    int    len;
+    int    pos;
+    int    active;
+} ActiveSound;
+
+static ActiveSound g_active_sounds[MAX_CONCURRENT_SOUNDS];
+
+static void audio_callback(void *userdata, Uint8 *stream, int len) {
+    float *fstream = (float *)stream;
+    int samples_count = len / sizeof(float);
+    
+    memset(fstream, 0, len);
+    
+    for (int i = 0; i < MAX_CONCURRENT_SOUNDS; i++) {
+        if (g_active_sounds[i].active) {
+            int remain = g_active_sounds[i].len - g_active_sounds[i].pos;
+            int to_mix = samples_count < remain ? samples_count : remain;
+            
+            float *src = g_active_sounds[i].samples + g_active_sounds[i].pos;
+            for (int j = 0; j < to_mix; j++) {
+                fstream[j] += src[j];
+            }
+            
+            g_active_sounds[i].pos += to_mix;
+            if (g_active_sounds[i].pos >= g_active_sounds[i].len) {
+                g_active_sounds[i].active = 0;
+            }
+        }
+    }
+}
+
 static void sound_init(void) {
     SDL_AudioSpec want = {0}, have;
     want.freq     = SAMPLE_RATE;
     want.format   = AUDIO_F32SYS;
     want.channels = 1;
     want.samples  = 512;
+    want.callback = audio_callback;
+    want.userdata = NULL;
+
+    memset(g_active_sounds, 0, sizeof(g_active_sounds));
 
     audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (audio_dev == 0) {
@@ -235,11 +274,17 @@ static void sound_init(void) {
 static void play_sound(SoundBuf *sb) {
     if (!g_opts.sound_enabled) return;
     if (audio_dev && sb->samples) {
-        /* Clear queued audio to avoid latency buildup */
-        Uint32 queued = SDL_GetQueuedAudioSize(audio_dev);
-        if (queued > SAMPLE_RATE * sizeof(float) / 4)
-            SDL_ClearQueuedAudio(audio_dev);
-        SDL_QueueAudio(audio_dev, sb->samples, sb->len * sizeof(float));
+        SDL_LockAudioDevice(audio_dev);
+        for (int i = 0; i < MAX_CONCURRENT_SOUNDS; i++) {
+            if (!g_active_sounds[i].active) {
+                g_active_sounds[i].samples = sb->samples;
+                g_active_sounds[i].len = sb->len;
+                g_active_sounds[i].pos = 0;
+                g_active_sounds[i].active = 1;
+                break;
+            }
+        }
+        SDL_UnlockAudioDevice(audio_dev);
     }
 }
 
