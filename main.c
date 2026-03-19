@@ -899,12 +899,14 @@ static void render(Doc *d) {
         static const char *shortcut_keys[] = {
             "Ctrl+S", "Ctrl+O", "Ctrl+Q", "Ctrl+Z",
             "Ctrl+C", "Ctrl+X", "Ctrl+V", "Ctrl+A",
+            "Ctrl+F",
         };
         static const char *shortcut_desc[] = {
             "Save", "Open", "Quit", "Undo",
             "Copy", "Cut", "Paste", "Select all",
+            "Find & Replace",
         };
-        #define SHORTCUT_COUNT 8
+        #define SHORTCUT_COUNT 9
 
         /* Menu panel — sized to fit options + shortcuts */
         int opts_h = MENU_ITEM_COUNT * 32;
@@ -999,7 +1001,7 @@ static void render(Doc *d) {
         SDL_Rect overlay = { 0, 0, ww, wh };
         SDL_RenderFillRect(g_ren, &overlay);
 
-        int fw = 400, fh = 140;
+        int fw = 480, fh = 140;
         int fx = (ww - fw) / 2, fy = (wh - fh) / 2;
 
         /* Panel */
