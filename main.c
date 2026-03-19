@@ -1383,10 +1383,13 @@ static void handle_menu_key(SDL_KeyboardEvent *ev) {
     }
     case SDLK_ESCAPE:
         g_menu_open = 0;
+        update_text_input_state();
         break;
     default:
-        if ((ev->keysym.mod & KMOD_CTRL) && ev->keysym.sym == SDLK_k)
+        if ((ev->keysym.mod & KMOD_CTRL) && ev->keysym.sym == SDLK_k) {
             g_menu_open = 0;
+            update_text_input_state();
+        }
         return;
     }
     g_need_redraw = 1;
