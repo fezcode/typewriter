@@ -1110,7 +1110,7 @@ static int file_dialog_save(char *out, int out_size) {
 #elif __APPLE__
 
 static int file_dialog_open(char *out, int out_size) {
-    FILE *p = popen("osascript -e 'POSIX path of (choose file)' 2>/dev/null", "r");
+    FILE *p = popen("osascript -e 'POSIX path of (choose file of type {\"public.plain-text\", \"net.daringfireball.markdown\", \"public.data\"})' 2>/dev/null", "r");
     if (!p) return -1;
     if (fgets(out, out_size, p)) {
         int len = (int)strlen(out);
