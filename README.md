@@ -1,5 +1,7 @@
 # Typewriter
 
+![Banner](banner.png)
+
 A distraction-free text editor with the soul of a mechanical typewriter.
 
 Built in C with SDL2 — fast, lightweight, cross-platform. Every keystroke clicks. Every carriage return clunks. The paper is warm, the cursor blinks, and the bell rings at column 80.
