@@ -1153,6 +1153,43 @@ static int file_dialog_save(char *out, int out_size) {
 
 /* ── Options menu helpers ───────────────────────────────────────── */
 
+static void settings_save(void) {
+    char path[MAX_PATH_LEN];
+    const char *base = SDL_GetBasePath();
+    if (!base) return;
+    snprintf(path, sizeof(path), "%stypewriter.ini", base);
+
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fprintf(f, "sound_enabled=%d\n", g_opts.sound_enabled);
+    fprintf(f, "show_line_numbers=%d\n", g_opts.show_line_numbers);
+    fprintf(f, "show_notebook_lines=%d\n", g_opts.show_notebook_lines);
+    fclose(f);
+}
+
+static void settings_load(void) {
+    char path[MAX_PATH_LEN];
+    const char *base = SDL_GetBasePath();
+    if (!base) return;
+    snprintf(path, sizeof(path), "%stypewriter.ini", base);
+
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        /* File doesn't exist, create it with defaults */
+        settings_save();
+        return;
+    }
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        int val;
+        if (sscanf(line, "sound_enabled=%d", &val) == 1) g_opts.sound_enabled = val;
+        else if (sscanf(line, "show_line_numbers=%d", &val) == 1) g_opts.show_line_numbers = val;
+        else if (sscanf(line, "show_notebook_lines=%d", &val) == 1) g_opts.show_notebook_lines = val;
+    }
+    fclose(f);
+}
+
 static int *menu_opt_ptr(int idx) {
     switch (idx) {
     case 0: return &g_opts.sound_enabled;
@@ -1179,7 +1216,10 @@ static void handle_menu_key(SDL_KeyboardEvent *ev) {
     case SDLK_KP_ENTER:
     case SDLK_SPACE: {
         int *p = menu_opt_ptr(g_menu_sel);
-        if (p) *p = !(*p);
+        if (p) {
+            *p = !(*p);
+            settings_save();
+        }
         break;
     }
     case SDLK_ESCAPE:
@@ -1585,6 +1625,9 @@ int main(int argc, char *argv[]) {
 
     /* Init sound */
     sound_init();
+
+    /* Load settings */
+    settings_load();
 
     /* Init document */
     doc_init(&g_doc);
