@@ -13,7 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 /* Embedded sound data (PCM float32, 44100Hz, mono) */
-#include "snd_click.h"
+#include "snd_keypress.h"
 #include "snd_clack.h"
 #include "snd_space.h"
 #include "snd_backspace.h"
@@ -135,28 +135,33 @@ typedef struct {
     int show_line_numbers;
     int show_notebook_lines;
     int theme_idx;
+    int font_size;
 } Options;
 
-#define MENU_ITEM_COUNT 4
+#define MENU_ITEM_COUNT 5
 
 static const char *menu_labels[MENU_ITEM_COUNT] = {
     "Sound effects",
     "Line numbers",
     "Notebook lines",
     "Theme",
+    "Font size",
 };
 
 /* ── Globals ───────────────────────────────────────────────────── */
 
 static SDL_Window   *g_win;
 static SDL_Renderer *g_ren;
-static TTF_Font     *g_font;
+static TTF_Font     *g_font;    /* Editor font (dynamic) */
+static TTF_Font     *g_ui_font; /* UI font (fixed size) */
 static int           g_char_w;
 static int           g_char_h;
+static int           g_ui_char_w;
+static int           g_ui_char_h;
 static int           g_running = 1;
 static int           g_need_redraw = 1;
 static Doc           g_doc;
-static Options       g_opts = { 1, 1, 0, 0 }; /* sound=on, lnums=on, lines=off, theme=cream */
+static Options       g_opts = { 1, 1, 0, 0, 18 }; /* sound=on, lnums=on, lines=off, theme=cream, font=18 */
 static int           g_menu_open = 0;
 static int           g_menu_sel  = 0;
 static int           g_quit_dialog = 0; /* save-before-quit dialog */
@@ -210,12 +215,31 @@ static int digit_count(int n) {
     return d;
 }
 
+/* Helper to get pixel width of a text segment */
+static int text_segment_width(TTF_Font *font, const char *text, int len) {
+    if (len <= 0) return 0;
+    int w = 0;
+    if (len < 1024) {
+        char buf[1024];
+        memcpy(buf, text, len);
+        buf[len] = '\0';
+        TTF_SizeUTF8(font, buf, &w, NULL);
+    } else {
+        char *buf = (char *)xmalloc(len + 1);
+        memcpy(buf, text, len);
+        buf[len] = '\0';
+        TTF_SizeUTF8(font, buf, &w, NULL);
+        free(buf);
+    }
+    return w;
+}
+
 /* Compute the left margin (gutter width) based on line count */
 static int compute_text_x(int line_count) {
     if (!g_opts.show_line_numbers) return MARGIN_LEFT_MIN;
     int digits = digit_count(line_count);
     if (digits < 3) digits = 3; /* minimum 3 digits wide */
-    return (digits + 1) * g_char_w + GUTTER_PAD;
+    return (digits + 1) * g_ui_char_w + GUTTER_PAD;
 }
 
 /* ── Sound (embedded PCM data) ─────────────────────────────────── */
@@ -281,7 +305,7 @@ static void sound_init(void) {
         SDL_PauseAudioDevice(audio_dev, 0);
     }
 
-    snd_click     = soundbuf_from_embed(snd_embed_click_data,     snd_embed_click_LEN);
+    snd_click     = soundbuf_from_embed(snd_embed_keypress_data,  snd_embed_keypress_LEN);
     snd_clack     = soundbuf_from_embed(snd_embed_clack_data,     snd_embed_clack_LEN);
     snd_space     = soundbuf_from_embed(snd_embed_space_data,     snd_embed_space_LEN);
     snd_backspace = soundbuf_from_embed(snd_embed_backspace_data, snd_embed_backspace_LEN);
@@ -782,7 +806,7 @@ static TTF_Font *load_font(int size) {
 
 /* ── Rendering ─────────────────────────────────────────────────── */
 
-static void render_text(const char *text, int len, int x, int y,
+static void render_text(TTF_Font *font, const char *text, int len, int x, int y,
                         SDL_Color col) {
     if (len <= 0) return;
     /* Build null-terminated substring */
@@ -790,7 +814,7 @@ static void render_text(const char *text, int len, int x, int y,
     memcpy(buf, text, len);
     buf[len] = '\0';
 
-    SDL_Surface *surf = TTF_RenderUTF8_Blended(g_font, buf, col);
+    SDL_Surface *surf = TTF_RenderUTF8_Blended(font, buf, col);
     free(buf);
     if (!surf) return;
     SDL_Texture *tex = SDL_CreateTextureFromSurface(g_ren, surf);
@@ -798,6 +822,16 @@ static void render_text(const char *text, int len, int x, int y,
     SDL_RenderCopy(g_ren, tex, NULL, &dst);
     SDL_DestroyTexture(tex);
     SDL_FreeSurface(surf);
+}
+
+static int *menu_opt_ptr(int idx) {
+    switch (idx) {
+    case 0: return &g_opts.sound_enabled;
+    case 1: return &g_opts.show_line_numbers;
+    case 2: return &g_opts.show_notebook_lines;
+    case 3: return &g_opts.theme_idx;
+    default: return NULL;
+    }
 }
 
 static void render(Doc *d) {
@@ -849,8 +883,8 @@ static void render(Doc *d) {
             int digits = digit_count(d->count);
             if (digits < 3) digits = 3;
             snprintf(lnum, sizeof(lnum), "%*d", digits, li + 1);
-            int lnum_w = (int)strlen(lnum) * g_char_w;
-            render_text(lnum, (int)strlen(lnum), text_x - GUTTER_PAD - lnum_w, y, t->lnum);
+            int lnum_w = text_segment_width(g_ui_font, lnum, (int)strlen(lnum));
+            render_text(g_ui_font, lnum, (int)strlen(lnum), text_x - GUTTER_PAD - lnum_w, y + (g_char_h - g_ui_char_h)/2, t->lnum);
         }
 
         /* Selection highlight */
@@ -858,19 +892,14 @@ static void render(Doc *d) {
             int sc = (li == sel_r1) ? sel_c1 : 0;
             int ec = (li == sel_r2) ? sel_c2 : ln->len;
             
-            /* Apply scroll offset */
-            sc -= d->scroll_x;
-            ec -= d->scroll_x;
+            int sc_rel = sc > d->scroll_x ? sc - d->scroll_x : 0;
+            int ec_rel = ec > d->scroll_x ? ec - d->scroll_x : 0;
             
-            /* Clamp to visible area */
-            if (sc < 0) sc = 0;
-            if (ec > (ww - text_x) / g_char_w) ec = (ww - text_x) / g_char_w;
-
-            if (sc < ec) {
-                SDL_Rect hr = {
-                    text_x + sc * g_char_w, y,
-                    (ec - sc) * g_char_w, g_char_h
-                };
+            if (sc_rel < ec_rel && ln->len > d->scroll_x) {
+                int x1 = text_x + text_segment_width(g_font, &ln->text[d->scroll_x], sc_rel);
+                int x2 = text_x + text_segment_width(g_font, &ln->text[d->scroll_x], ec_rel);
+                
+                SDL_Rect hr = { x1, y, x2 - x1, g_char_h };
                 SDL_SetRenderDrawColor(g_ren, t->sel_bg.r, t->sel_bg.g, t->sel_bg.b, 255);
                 SDL_RenderFillRect(g_ren, &hr);
             }
@@ -880,11 +909,12 @@ static void render(Doc *d) {
         if (ln->len > d->scroll_x) {
             int start_col = d->scroll_x;
             int len = ln->len - start_col;
-            int max_vis_chars = (ww - text_x) / g_char_w;
+            /* Conservative estimate: assume at least 4px per character */
+            int max_vis_chars = (ww - text_x) / 4 + 40;
             if (len > max_vis_chars) len = max_vis_chars;
             
             if (len > 0)
-                render_text(&ln->text[start_col], len, text_x, y, t->text);
+                render_text(g_font, &ln->text[start_col], len, text_x, y, t->text);
         }
     }
 
@@ -892,20 +922,27 @@ static void render(Doc *d) {
     Uint32 now = SDL_GetTicks();
     if ((now / CURSOR_BLINK_MS) % 2 == 0) {
         int cx_rel = d->cx - d->scroll_x;
-        int cx_screen = text_x + cx_rel * g_char_w;
         int cy_screen = MARGIN_TOP + (d->cy - d->scroll_y) * g_char_h;
         
-        int vis_chars = (ww - text_x) / g_char_w;
-
-        if (d->cy >= d->scroll_y && d->cy < d->scroll_y + vis &&
-            cx_rel >= 0 && cx_rel <= vis_chars) {
-            SDL_SetRenderDrawColor(g_ren, t->cursor.r, t->cursor.g, t->cursor.b, t->cursor.a);
-            SDL_Rect cr = { cx_screen, cy_screen, 2, g_char_h };
-            SDL_RenderFillRect(g_ren, &cr);
-            /* Underscore style second cursor indicator */
-            if (cx_rel < vis_chars) {
-                SDL_Rect ul = { cx_screen, cy_screen + g_char_h - 2, g_char_w, 2 };
-                SDL_RenderFillRect(g_ren, &ul);
+        if (d->cy >= d->scroll_y && d->cy < d->scroll_y + vis && cx_rel >= 0) {
+            Line *ln = &d->lines[d->cy];
+            int cx_screen = text_x + text_segment_width(g_font, &ln->text[d->scroll_x], cx_rel);
+            
+            if (cx_screen < ww) {
+                SDL_SetRenderDrawColor(g_ren, t->cursor.r, t->cursor.g, t->cursor.b, t->cursor.a);
+                SDL_Rect cr = { cx_screen, cy_screen, 2, g_char_h };
+                SDL_RenderFillRect(g_ren, &cr);
+                
+                /* Underscore style second cursor indicator */
+                int next_w = g_char_w;
+                if (d->cx < ln->len) {
+                    next_w = text_segment_width(g_font, &ln->text[d->cx], 1);
+                    if (next_w <= 0) next_w = g_char_w;
+                }
+                if (cx_screen + next_w <= ww) {
+                    SDL_Rect ul = { cx_screen, cy_screen + g_char_h - 2, next_w, 2 };
+                    SDL_RenderFillRect(g_ren, &ul);
+                }
             }
         }
     }
@@ -922,7 +959,7 @@ static void render(Doc *d) {
     snprintf(fname_short, sizeof(fname_short), "%.120s", fname);
     snprintf(status, sizeof(status), " %s%s  |  Ln %d, Col %d  |  %d lines  |  Ctrl+K options",
              fname_short, d->dirty ? " *" : "", d->cy + 1, d->cx + 1, d->count);
-    render_text(status, (int)strlen(status), 8, wh - 24, t->status_fg);
+    render_text(g_ui_font, status, (int)strlen(status), 8, wh - 24, t->status_fg);
 
     /* ── Options menu overlay ── */
     if (g_menu_open) {
@@ -965,20 +1002,13 @@ static void render(Doc *d) {
         /* Title */
         SDL_Color title_col = { 230, 225, 215, 255 };
         const char *title = "Options";
-        render_text(title, (int)strlen(title), panel_x + 16, panel_y + 12, title_col);
+        render_text(g_ui_font, title, (int)strlen(title), panel_x + 16, panel_y + 12, title_col);
 
         /* Separator */
         SDL_SetRenderDrawColor(g_ren, 80, 76, 70, 255);
         SDL_RenderDrawLine(g_ren, panel_x + 12, panel_y + 40, panel_x + panel_w - 12, panel_y + 40);
 
         /* Toggle items */
-        int *opt_ptrs[MENU_ITEM_COUNT] = {
-            &g_opts.sound_enabled,
-            &g_opts.show_line_numbers,
-            &g_opts.show_notebook_lines,
-            &g_opts.theme_idx,
-        };
-
         for (int mi = 0; mi < MENU_ITEM_COUNT; mi++) {
             int item_y = panel_y + 50 + mi * 32;
 
@@ -995,12 +1025,15 @@ static void render(Doc *d) {
             char row[128];
             if (mi == 3) {
                 const char *theme_names[] = { "Classic Cream", "Dark Mode", "Terminal Green" };
-                snprintf(row, sizeof(row), "    %s: %s", menu_labels[mi], theme_names[*opt_ptrs[mi]]);
+                snprintf(row, sizeof(row), "    %s: %s", menu_labels[mi], theme_names[g_opts.theme_idx]);
+            } else if (mi == 4) {
+                snprintf(row, sizeof(row), "    %s: %d", menu_labels[mi], g_opts.font_size);
             } else {
+                int *p = menu_opt_ptr(mi);
                 snprintf(row, sizeof(row), "[%c] %s",
-                         *opt_ptrs[mi] ? 'x' : ' ', menu_labels[mi]);
+                         (p && *p) ? 'x' : ' ', menu_labels[mi]);
             }
-            render_text(row, (int)strlen(row), panel_x + 20, item_y + 2, item_col);
+            render_text(g_ui_font, row, (int)strlen(row), panel_x + 20, item_y + 2, item_col);
         }
 
         /* Shortcuts section */
@@ -1010,22 +1043,22 @@ static void render(Doc *d) {
 
         SDL_Color sc_title_col = { 200, 195, 185, 255 };
         const char *sc_title = "Keyboard Shortcuts";
-        render_text(sc_title, (int)strlen(sc_title), panel_x + 16, sc_top + 6, sc_title_col);
+        render_text(g_ui_font, sc_title, (int)strlen(sc_title), panel_x + 16, sc_top + 6, sc_title_col);
 
         SDL_Color sc_key_col  = { 180, 175, 165, 255 };
         SDL_Color sc_desc_col = { 145, 140, 132, 255 };
         for (int si = 0; si < SHORTCUT_COUNT; si++) {
             int sy = sc_top + 28 + si * 22;
-            render_text(shortcut_keys[si], (int)strlen(shortcut_keys[si]),
+            render_text(g_ui_font, shortcut_keys[si], (int)strlen(shortcut_keys[si]),
                         panel_x + 24, sy, sc_key_col);
-            render_text(shortcut_desc[si], (int)strlen(shortcut_desc[si]),
-                        panel_x + 24 + 10 * g_char_w, sy, sc_desc_col);
+            render_text(g_ui_font, shortcut_desc[si], (int)strlen(shortcut_desc[si]),
+                        panel_x + 24 + 10 * g_ui_char_w, sy, sc_desc_col);
         }
 
         /* Footer hint */
         SDL_Color hint_col = { 140, 135, 128, 255 };
         const char *hint = "Up/Down  Enter=toggle  Esc=close";
-        render_text(hint, (int)strlen(hint), panel_x + 16,
+        render_text(g_ui_font, hint, (int)strlen(hint), panel_x + 16,
                     panel_y + panel_h - 24, hint_col);
 
         SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_NONE);
@@ -1052,12 +1085,12 @@ static void render(Doc *d) {
         SDL_Color label_col = { 200, 195, 185, 255 };
         SDL_Color text_col = { 255, 245, 220, 255 };
         
-        render_text("Find:", 5, fx + 20, fy + 20, label_col);
-        render_text("Replace:", 8, fx + 20, fy + 60, label_col);
+        render_text(g_ui_font, "Find:", 5, fx + 20, fy + 20, label_col);
+        render_text(g_ui_font, "Replace:", 8, fx + 20, fy + 60, label_col);
 
         /* Input boxes */
-        SDL_Rect box1 = { fx + 100, fy + 16, fw - 120, g_char_h + 8 };
-        SDL_Rect box2 = { fx + 100, fy + 56, fw - 120, g_char_h + 8 };
+        SDL_Rect box1 = { fx + 100, fy + 16, fw - 120, g_ui_char_h + 8 };
+        SDL_Rect box2 = { fx + 100, fy + 56, fw - 120, g_ui_char_h + 8 };
         
         SDL_SetRenderDrawColor(g_ren, 30, 28, 26, 255);
         SDL_RenderFillRect(g_ren, &box1);
@@ -1071,20 +1104,20 @@ static void render(Doc *d) {
             SDL_RenderDrawRect(g_ren, &box2);
         }
 
-        render_text(g_find_text, (int)strlen(g_find_text), box1.x + 4, box1.y + 4, text_col);
-        render_text(g_replace_text, (int)strlen(g_replace_text), box2.x + 4, box2.y + 4, text_col);
+        render_text(g_ui_font, g_find_text, (int)strlen(g_find_text), box1.x + 4, box1.y + 4, text_col);
+        render_text(g_ui_font, g_replace_text, (int)strlen(g_replace_text), box2.x + 4, box2.y + 4, text_col);
 
         /* Cursor in focused box */
         Uint32 now = SDL_GetTicks();
         if ((now / CURSOR_BLINK_MS) % 2 == 0) {
             SDL_SetRenderDrawColor(g_ren, 200, 200, 200, 255);
             if (g_find_focus == 0) {
-                int cw = (int)strlen(g_find_text) * g_char_w;
-                SDL_Rect cr = { box1.x + 4 + cw, box1.y + 4, 2, g_char_h };
+                int cw = text_segment_width(g_ui_font, g_find_text, (int)strlen(g_find_text));
+                SDL_Rect cr = { box1.x + 4 + cw, box1.y + 4, 2, g_ui_char_h };
                 SDL_RenderFillRect(g_ren, &cr);
             } else {
-                int cw = (int)strlen(g_replace_text) * g_char_w;
-                SDL_Rect cr = { box2.x + 4 + cw, box2.y + 4, 2, g_char_h };
+                int cw = text_segment_width(g_ui_font, g_replace_text, (int)strlen(g_replace_text));
+                SDL_Rect cr = { box2.x + 4 + cw, box2.y + 4, 2, g_ui_char_h };
                 SDL_RenderFillRect(g_ren, &cr);
             }
         }
@@ -1092,7 +1125,7 @@ static void render(Doc *d) {
         /* Footer hint */
         SDL_Color hint_col = { 140, 135, 128, 255 };
         const char *hint = "Tab=switch  Enter=find  Shift+Enter=replace";
-        render_text(hint, (int)strlen(hint), fx + 16, fy + fh - 24, hint_col);
+        render_text(g_ui_font, hint, (int)strlen(hint), fx + 16, fy + fh - 24, hint_col);
 
         SDL_SetRenderDrawBlendMode(g_ren, SDL_BLENDMODE_NONE);
     }
@@ -1117,14 +1150,14 @@ static void render(Doc *d) {
         /* Message */
         SDL_Color msg_col = { 230, 225, 215, 255 };
         const char *msg = "You have unsaved changes.";
-        render_text(msg, (int)strlen(msg), qx + 20, qy + 16, msg_col);
+        render_text(g_ui_font, msg, (int)strlen(msg), qx + 20, qy + 16, msg_col);
 
         /* Buttons */
         static const char *btn_labels[3] = { "[S]ave", "[D]on't Save", "[C]ancel" };
         int btn_x = qx + 20;
         for (int bi = 0; bi < 3; bi++) {
-            int bw = (int)strlen(btn_labels[bi]) * g_char_w + 24;
-            int bh = g_char_h + 16;
+            int bw = text_segment_width(g_ui_font, btn_labels[bi], (int)strlen(btn_labels[bi])) + 24;
+            int bh = g_ui_char_h + 16;
             int by = qy + qh - bh - 18;
 
             /* Button background */
@@ -1144,7 +1177,7 @@ static void render(Doc *d) {
             SDL_Color bcol = (bi == g_quit_sel)
                 ? (SDL_Color){ 255, 245, 220, 255 }
                 : (SDL_Color){ 180, 175, 165, 255 };
-            render_text(btn_labels[bi], (int)strlen(btn_labels[bi]),
+            render_text(g_ui_font, btn_labels[bi], (int)strlen(btn_labels[bi]),
                         btn_x + 12, by + 8, bcol);
 
             btn_x += bw + 12;
@@ -1290,10 +1323,18 @@ static void settings_save(void) {
     fprintf(f, "show_line_numbers=%d\n", g_opts.show_line_numbers);
     fprintf(f, "show_notebook_lines=%d\n", g_opts.show_notebook_lines);
     fprintf(f, "theme_idx=%d\n", g_opts.theme_idx);
+    fprintf(f, "font_size=%d\n", g_opts.font_size);
     fclose(f);
 }
 
 static void settings_load(void) {
+    /* Set defaults first */
+    g_opts.sound_enabled = 1;
+    g_opts.show_line_numbers = 1;
+    g_opts.show_notebook_lines = 0;
+    g_opts.theme_idx = 0;
+    g_opts.font_size = 18;
+
     char path[MAX_PATH_LEN];
     const char *base = SDL_GetBasePath();
     if (!base) return;
@@ -1301,7 +1342,6 @@ static void settings_load(void) {
 
     FILE *f = fopen(path, "r");
     if (!f) {
-        /* File doesn't exist, create it with defaults */
         settings_save();
         return;
     }
@@ -1316,18 +1356,11 @@ static void settings_load(void) {
             g_opts.theme_idx = val;
             if (g_opts.theme_idx < 0 || g_opts.theme_idx >= THEME_COUNT) g_opts.theme_idx = 0;
         }
+        else if (sscanf(line, "font_size=%d", &val) == 1) {
+            g_opts.font_size = clamp(val, 8, 72);
+        }
     }
     fclose(f);
-}
-
-static int *menu_opt_ptr(int idx) {
-    switch (idx) {
-    case 0: return &g_opts.sound_enabled;
-    case 1: return &g_opts.show_line_numbers;
-    case 2: return &g_opts.show_notebook_lines;
-    case 3: return &g_opts.theme_idx;
-    default: return NULL;
-    }
 }
 
 static void menu_toggle(void);
@@ -1346,6 +1379,18 @@ static void menu_toggle(void) {
     g_need_redraw = 1;
 }
 
+static void reload_font(void) {
+    if (g_font) TTF_CloseFont(g_font);
+    g_font = load_font(g_opts.font_size);
+    if (!g_font) {
+        /* Fallback if load fails */
+        g_font = load_font(18);
+    }
+    if (g_font) {
+        TTF_SizeText(g_font, "M", &g_char_w, &g_char_h);
+    }
+}
+
 static void handle_menu_key(SDL_KeyboardEvent *ev) {
     switch (ev->keysym.sym) {
     case SDLK_UP:
@@ -1358,11 +1403,19 @@ static void handle_menu_key(SDL_KeyboardEvent *ev) {
         if (g_menu_sel == 3) {
             g_opts.theme_idx = (g_opts.theme_idx + 1) % THEME_COUNT;
             settings_save();
+        } else if (g_menu_sel == 4) {
+            g_opts.font_size = clamp(g_opts.font_size + 1, 8, 72);
+            reload_font();
+            settings_save();
         }
         break;
     case SDLK_LEFT:
         if (g_menu_sel == 3) {
             g_opts.theme_idx = (g_opts.theme_idx - 1 + THEME_COUNT) % THEME_COUNT;
+            settings_save();
+        } else if (g_menu_sel == 4) {
+            g_opts.font_size = clamp(g_opts.font_size - 1, 8, 72);
+            reload_font();
             settings_save();
         }
         break;
@@ -1372,6 +1425,8 @@ static void handle_menu_key(SDL_KeyboardEvent *ev) {
         if (g_menu_sel == 3) {
             g_opts.theme_idx = (g_opts.theme_idx + 1) % THEME_COUNT;
             settings_save();
+        } else if (g_menu_sel == 4) {
+             /* nothing for Enter on Font size yet */
         } else {
             int *p = menu_opt_ptr(g_menu_sel);
             if (p) {
@@ -1908,17 +1963,21 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Load font */
-    g_font = load_font(FONT_SIZE);
-    if (!g_font) {
-        fprintf(stderr, "Could not load any font. Place 'typewriter.ttf' next to the executable\n"
-                        "or set TYPEWRITER_FONT=/path/to/font.ttf\n");
+    /* Load UI font (fixed size) */
+    g_ui_font = load_font(18);
+    if (!g_ui_font) {
+        fprintf(stderr, "Could not load UI font. Place 'typewriter.ttf' next to the executable\n");
         SDL_DestroyRenderer(g_ren); SDL_DestroyWindow(g_win);
         TTF_Quit(); SDL_Quit();
         return 1;
     }
+    TTF_SizeText(g_ui_font, "M", &g_ui_char_w, &g_ui_char_h);
 
-    /* Measure character size (monospace assumed) */
+    /* Load initial editor font */
+    g_font = load_font(18);
+    if (!g_font) {
+        g_font = g_ui_font; /* last resort fallback */
+    }
     TTF_SizeText(g_font, "M", &g_char_w, &g_char_h);
 
     /* Init sound */
@@ -1926,6 +1985,7 @@ int main(int argc, char *argv[]) {
 
     /* Load settings */
     settings_load();
+    reload_font();
 
     /* Init document */
     doc_init(&g_doc);
@@ -1990,6 +2050,7 @@ int main(int argc, char *argv[]) {
     doc_free(&g_doc);
     sound_cleanup();
     if (g_font) TTF_CloseFont(g_font);
+    if (g_ui_font && g_ui_font != g_font) TTF_CloseFont(g_ui_font);
     SDL_DestroyRenderer(g_ren);
     SDL_DestroyWindow(g_win);
     TTF_Quit();
