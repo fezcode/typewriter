@@ -20,6 +20,8 @@ Built in C with SDL2 — fast, lightweight, cross-platform. Every keystroke clic
 - **Undo** — `Ctrl+Z` with a 512-entry history.
 - **Options menu** — `Ctrl+K` to toggle sounds, line numbers, notebook lines, and cycle themes.
 
+![Screenshot](./example.png)
+
 ## Build
 
 Requires SDL2 and SDL2_ttf development libraries.
