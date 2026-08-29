@@ -19,6 +19,7 @@ Built in C with SDL2 — fast, lightweight, cross-platform. Every keystroke clic
 - **Drag and drop** — drop a file onto the window to open it.
 - **Undo** — `Ctrl+Z` with a 512-entry history.
 - **Options menu** — `Ctrl+K` to toggle sounds, line numbers, notebook lines, and cycle themes.
+- **Hisashi menubar** (Windows) — with [Hisashi](https://github.com/fezcode/hisashi) running, File / Edit / View / Help menus with every option and shortcut appear in its macOS-style menu bar. Off by default; switch it on in the Options menu.
 
 ![Screenshot](./example.png)
 
@@ -108,8 +109,10 @@ Options:
 
 ### Options Menu (`Ctrl+K`)
 - **Up/Down**: Navigate options
-- **Left/Right / Space / Enter**: Cycle themes or toggle options
+- **Left/Right / Space / Enter**: Cycle themes, change the font size, or toggle options
 - **Esc**: Close menu
+
+Rows: Sound effects · Line numbers · Notebook lines · Theme · Font size · Hisashi menubar (Windows only).
 
 ### Find & Replace (`Ctrl+F`)
 - **Tab**: Switch between Find and Replace fields
@@ -121,6 +124,19 @@ Options:
 - **S**: Save and quit
 - **D / N**: Don't save and quit
 - **C / Esc**: Cancel
+
+## Hisashi menubar (Windows)
+
+[Hisashi](https://github.com/fezcode/hisashi) 0.5+ provides a macOS-style global menu bar for Windows. Turn on **Hisashi menubar** in the Options menu (`Ctrl+K`) and, whenever Typewriter is the foreground window, the bar shows:
+
+| Menu | Items |
+|------|-------|
+| **File** | Open…, Save, Quit |
+| **Edit** | Undo, Cut, Copy, Paste, Select All, Find & Replace… |
+| **View** | Sound effects ✓, Line numbers ✓, Notebook lines ✓, Theme ▸ (Classic Cream / Dark Mode / Terminal Green), Font size, Larger font, Smaller font, Options… |
+| **Help** | Keyboard Shortcuts…, version |
+
+Checkmarks track the live settings and every row shows its keyboard shortcut. The integration is the single-header `hoswl.h` client vendored from Hisashi (`sdk/hoswl`): no threads, nothing ever blocks on the pipe, and if Hisashi is not running Typewriter simply retries every couple of seconds. The setting is persisted as `hisashi_menubar=` in `typewriter.ini`.
 
 ## Fonts
 

@@ -19,6 +19,8 @@
 #include "snd_backspace.h"
 #include "snd_bell.h"
 #include "font_embed.h"
+#define HOSWL_IMPLEMENTATION   /* Hisashi menubar client (hoswl.h); no-op off Windows */
+#include "hoswl.h"
 
 /* ── Configuration ─────────────────────────────────────────────── */
 
@@ -67,6 +69,8 @@ static const Theme g_themes[] = {
     }
 };
 #define THEME_COUNT 3
+
+static const char *theme_names[THEME_COUNT] = { "Classic Cream", "Dark Mode", "Terminal Green" };
 
 
 /* ── Line buffer ───────────────────────────────────────────────── */
@@ -137,9 +141,14 @@ typedef struct {
     int show_notebook_lines;
     int theme_idx;
     int font_size;
+    int hisashi_menubar;    /* Windows: publish menus to Hisashi's menubar */
 } Options;
 
+#ifdef _WIN32
+#define MENU_ITEM_COUNT 6   /* last row: Hisashi menubar (Windows only) */
+#else
 #define MENU_ITEM_COUNT 5
+#endif
 
 static const char *menu_labels[MENU_ITEM_COUNT] = {
     "Sound effects",
@@ -147,6 +156,9 @@ static const char *menu_labels[MENU_ITEM_COUNT] = {
     "Notebook lines",
     "Theme",
     "Font size",
+#ifdef _WIN32
+    "Hisashi menubar",
+#endif
 };
 
 /* ── Globals ───────────────────────────────────────────────────── */
@@ -162,7 +174,7 @@ static int           g_ui_char_h;
 static int           g_running = 1;
 static int           g_need_redraw = 1;
 static Doc           g_doc;
-static Options       g_opts = { 1, 1, 0, 0, 18 }; /* sound=on, lnums=on, lines=off, theme=cream, font=18 */
+static Options       g_opts = { 1, 1, 0, 0, 18, 0 }; /* sound=on, lnums=on, lines=off, theme=cream, font=18, hisashi=off */
 static int           g_menu_open = 0;
 static int           g_menu_sel  = 0;
 static int           g_quit_dialog = 0; /* save-before-quit dialog */
@@ -841,6 +853,7 @@ static int *menu_opt_ptr(int idx) {
     case 1: return &g_opts.show_line_numbers;
     case 2: return &g_opts.show_notebook_lines;
     case 3: return &g_opts.theme_idx;
+    case 5: return &g_opts.hisashi_menubar;
     default: return NULL;
     }
 }
@@ -1035,7 +1048,6 @@ static void render(Doc *d) {
 
             char row[128];
             if (mi == 3) {
-                const char *theme_names[] = { "Classic Cream", "Dark Mode", "Terminal Green" };
                 snprintf(row, sizeof(row), "    %s: %s", menu_labels[mi], theme_names[g_opts.theme_idx]);
             } else if (mi == 4) {
                 snprintf(row, sizeof(row), "    %s: %d", menu_labels[mi], g_opts.font_size);
@@ -1335,6 +1347,7 @@ static void settings_save(void) {
     fprintf(f, "show_notebook_lines=%d\n", g_opts.show_notebook_lines);
     fprintf(f, "theme_idx=%d\n", g_opts.theme_idx);
     fprintf(f, "font_size=%d\n", g_opts.font_size);
+    fprintf(f, "hisashi_menubar=%d\n", g_opts.hisashi_menubar);
     fclose(f);
 }
 
@@ -1345,6 +1358,7 @@ static void settings_load(void) {
     g_opts.show_notebook_lines = 0;
     g_opts.theme_idx = 0;
     g_opts.font_size = 18;
+    g_opts.hisashi_menubar = 0;
 
     char path[MAX_PATH_LEN];
     const char *base = SDL_GetBasePath();
@@ -1363,6 +1377,7 @@ static void settings_load(void) {
         if (sscanf(line, "sound_enabled=%d", &val) == 1) g_opts.sound_enabled = val;
         else if (sscanf(line, "show_line_numbers=%d", &val) == 1) g_opts.show_line_numbers = val;
         else if (sscanf(line, "show_notebook_lines=%d", &val) == 1) g_opts.show_notebook_lines = val;
+        else if (sscanf(line, "hisashi_menubar=%d", &val) == 1) g_opts.hisashi_menubar = val != 0;
         else if (sscanf(line, "theme_idx=%d", &val) == 1) {
             g_opts.theme_idx = val;
             if (g_opts.theme_idx < 0 || g_opts.theme_idx >= THEME_COUNT) g_opts.theme_idx = 0;
@@ -1402,6 +1417,28 @@ static void reload_font(void) {
     }
 }
 
+/* Option changes shared by the Options panel and the Hisashi menubar. */
+static void option_toggle(int idx) {
+    int *p = menu_opt_ptr(idx);
+    if (!p) return;
+    *p = !(*p);
+    settings_save();
+    g_need_redraw = 1;
+}
+
+static void option_set_theme(int idx) {
+    g_opts.theme_idx = ((idx % THEME_COUNT) + THEME_COUNT) % THEME_COUNT;
+    settings_save();
+    g_need_redraw = 1;
+}
+
+static void option_font_size_delta(int delta) {
+    g_opts.font_size = clamp(g_opts.font_size + delta, 8, 72);
+    reload_font();
+    settings_save();
+    g_need_redraw = 1;
+}
+
 static void handle_menu_key(SDL_KeyboardEvent *ev) {
     switch (ev->keysym.sym) {
     case SDLK_UP:
@@ -1411,42 +1448,20 @@ static void handle_menu_key(SDL_KeyboardEvent *ev) {
         g_menu_sel = (g_menu_sel + 1) % MENU_ITEM_COUNT;
         break;
     case SDLK_RIGHT:
-        if (g_menu_sel == 3) {
-            g_opts.theme_idx = (g_opts.theme_idx + 1) % THEME_COUNT;
-            settings_save();
-        } else if (g_menu_sel == 4) {
-            g_opts.font_size = clamp(g_opts.font_size + 1, 8, 72);
-            reload_font();
-            settings_save();
-        }
+        if (g_menu_sel == 3) option_set_theme(g_opts.theme_idx + 1);
+        else if (g_menu_sel == 4) option_font_size_delta(+1);
         break;
     case SDLK_LEFT:
-        if (g_menu_sel == 3) {
-            g_opts.theme_idx = (g_opts.theme_idx - 1 + THEME_COUNT) % THEME_COUNT;
-            settings_save();
-        } else if (g_menu_sel == 4) {
-            g_opts.font_size = clamp(g_opts.font_size - 1, 8, 72);
-            reload_font();
-            settings_save();
-        }
+        if (g_menu_sel == 3) option_set_theme(g_opts.theme_idx - 1);
+        else if (g_menu_sel == 4) option_font_size_delta(-1);
         break;
     case SDLK_RETURN:
     case SDLK_KP_ENTER:
-    case SDLK_SPACE: {
-        if (g_menu_sel == 3) {
-            g_opts.theme_idx = (g_opts.theme_idx + 1) % THEME_COUNT;
-            settings_save();
-        } else if (g_menu_sel == 4) {
-             /* nothing for Enter on Font size yet */
-        } else {
-            int *p = menu_opt_ptr(g_menu_sel);
-            if (p) {
-                *p = !(*p);
-                settings_save();
-            }
-        }
+    case SDLK_SPACE:
+        if (g_menu_sel == 3) option_set_theme(g_opts.theme_idx + 1);
+        else if (g_menu_sel == 4) { /* nothing for Enter on Font size yet */ }
+        else option_toggle(g_menu_sel);
         break;
-    }
     case SDLK_ESCAPE:
         g_menu_open = 0;
         update_text_input_state();
@@ -1642,6 +1657,202 @@ static void handle_find_key(SDL_KeyboardEvent *ev, Doc *d) {
 
 /* ── Input handling ────────────────────────────────────────────── */
 
+/* ── Editor actions ────────────────────────────────────────────────
+ * Shared by the keyboard shortcuts and the Hisashi menubar. */
+
+static void action_save(Doc *d) {
+    if (d->filepath[0] == '\0') {
+        char path[MAX_PATH_LEN] = {0};
+        if (file_dialog_save(path, sizeof(path)) == 0) {
+            snprintf(d->filepath, MAX_PATH_LEN, "%s", path);
+        }
+    }
+    if (doc_save(d) == 0) {
+        g_need_redraw = 1;
+    }
+}
+
+static void action_open(Doc *d) {
+    char path[MAX_PATH_LEN] = {0};
+    if (file_dialog_open(path, sizeof(path)) == 0) {
+        doc_load(d, path);
+        g_need_redraw = 1;
+    }
+}
+
+static void action_undo(Doc *d) {
+    undo_pop(d);
+    doc_scroll_to_cursor(d);
+}
+
+static void action_copy(Doc *d) {
+    clipboard_copy(d);
+}
+
+static void action_cut(Doc *d) {
+    clipboard_copy(d);
+    sel_delete(d);
+    g_need_redraw = 1;
+}
+
+static void action_paste(Doc *d) {
+    clipboard_paste(d);
+    doc_scroll_to_cursor(d);
+    g_need_redraw = 1;
+}
+
+static void action_select_all(Doc *d) {
+    d->sel_active = 1;
+    d->sel_ax = 0; d->sel_ay = 0;
+    d->cy = d->count - 1;
+    d->cx = d->lines[d->cy].len;
+    g_need_redraw = 1;
+}
+
+static void action_find(void) {
+    g_find_dialog = 1;
+    g_find_focus = 0;
+    g_need_redraw = 1;
+}
+
+#ifdef _WIN32
+/* ── Hisashi menubar (hoswl) ──────────────────────────────────────
+ * Publishes File / Edit / View / Help to Hisashi's macOS-style menubar over
+ * the named pipe \\.\pipe\hoswl (hoswl.h, vendored from hisashi/sdk/hoswl;
+ * protocol in hisashi/docs/hoswl-protocol.md). Switched on from the Options
+ * menu ("Hisashi menubar"). No threads and nothing blocks: hisashi_flush()
+ * runs once per main-loop iteration, connects lazily (retrying every 2 s
+ * while Hisashi is absent), republishes when an option changed, and runs
+ * the clicked actions there — never from inside a callback. */
+
+static hoswl_t  g_hoswl;
+static unsigned g_hoswl_fingerprint;
+
+static int hisashi_active(void) {
+    return g_opts.hisashi_menubar && hoswl_connected(&g_hoswl);
+}
+
+/* FNV-1a over everything the published menu shows: checkmarks, theme, size. */
+static unsigned hisashi_fingerprint(void) {
+    int vals[] = { g_opts.sound_enabled, g_opts.show_line_numbers,
+                   g_opts.show_notebook_lines, g_opts.theme_idx, g_opts.font_size };
+    unsigned h = 2166136261u;
+    for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++)
+        h = (h ^ (unsigned)(vals[i] + 1)) * 16777619u;
+    return h;
+}
+
+/* Everything the Options menu offers, plus its shortcut list, as menus.
+ * Key hints are display only; the keyboard is still handled here. */
+static void hisashi_publish(void) {
+    char text[2048];
+    int o = 0;
+    #define PUT(...) do { \
+        int w_ = snprintf(text + o, sizeof(text) - (size_t)o, __VA_ARGS__); \
+        if (w_ < 0 || (size_t)w_ >= sizeof(text) - (size_t)o) { \
+            fprintf(stderr, "hoswl: menu text too large, not published\n"); return; } \
+        o += w_; } while (0)
+    PUT("File\n"
+        " file.open|Open…|Ctrl+O\n"
+        " file.save|Save|Ctrl+S\n"
+        " -\n"
+        " file.quit|Quit|Ctrl+Q\n"
+        "Edit\n"
+        " edit.undo|Undo|Ctrl+Z\n"
+        " -\n"
+        " edit.cut|Cut|Ctrl+X\n"
+        " edit.copy|Copy|Ctrl+C\n"
+        " edit.paste|Paste|Ctrl+V\n"
+        " edit.selectall|Select All|Ctrl+A\n"
+        " -\n"
+        " edit.find|Find & Replace…|Ctrl+F\n"
+        "View\n"
+        " view.sound|Sound effects||%s\n"
+        " view.lnums|Line numbers||%s\n"
+        " view.notebook|Notebook lines||%s\n"
+        " -\n"
+        " view.theme|Theme|>\n",
+        g_opts.sound_enabled ? "x" : "c",
+        g_opts.show_line_numbers ? "x" : "c",
+        g_opts.show_notebook_lines ? "x" : "c");
+    for (int i = 0; i < THEME_COUNT; i++)
+        PUT("  view.theme.%d|%s||%s\n", i, theme_names[i], g_opts.theme_idx == i ? "x" : "c");
+    PUT(" -\n"
+        " view.fontsize|Font size: %d||d\n"
+        " view.font.larger|Larger font\n"
+        " view.font.smaller|Smaller font\n"
+        " -\n"
+        " view.options|Options…|Ctrl+K\n"
+        "Help\n"
+        " help.shortcuts|Keyboard Shortcuts…|Ctrl+K\n"
+        " -\n"
+        " help.version|Typewriter %s||d\n",
+        g_opts.font_size, TYPEWRITER_VERSION);
+    #undef PUT
+    if (hoswl_set_menus(&g_hoswl, text) != 0)
+        fprintf(stderr, "hoswl: menu rejected: %s\n", g_hoswl.last_error);
+}
+
+static void hisashi_dispatch(const char *id, Doc *d) {
+    int i;
+    if (g_quit_dialog) return;   /* the save-before-quit dialog owns the input */
+
+    /* Option rows work whatever panel is open */
+    if (strcmp(id, "view.sound") == 0)        { option_toggle(0); return; }
+    if (strcmp(id, "view.lnums") == 0)        { option_toggle(1); return; }
+    if (strcmp(id, "view.notebook") == 0)     { option_toggle(2); return; }
+    if (sscanf(id, "view.theme.%d", &i) == 1) { if (i >= 0 && i < THEME_COUNT) option_set_theme(i); return; }
+    if (strcmp(id, "view.font.larger") == 0)  { option_font_size_delta(+1); return; }
+    if (strcmp(id, "view.font.smaller") == 0) { option_font_size_delta(-1); return; }
+
+    /* Actions first put away the Find dialog and the Options panel */
+    if (g_find_dialog) { g_find_dialog = 0; g_need_redraw = 1; }
+    if (strcmp(id, "view.options") == 0 || strcmp(id, "help.shortcuts") == 0) {
+        if (!g_menu_open) menu_toggle();
+        return;
+    }
+    if (g_menu_open) menu_toggle();   /* also re-enables text input */
+
+    if      (strcmp(id, "file.open") == 0)      action_open(d);
+    else if (strcmp(id, "file.save") == 0)      action_save(d);
+    else if (strcmp(id, "file.quit") == 0)      try_quit(d);
+    else if (strcmp(id, "edit.undo") == 0)      action_undo(d);
+    else if (strcmp(id, "edit.cut") == 0)       action_cut(d);
+    else if (strcmp(id, "edit.copy") == 0)      action_copy(d);
+    else if (strcmp(id, "edit.paste") == 0)     action_paste(d);
+    else if (strcmp(id, "edit.selectall") == 0) action_select_all(d);
+    else if (strcmp(id, "edit.find") == 0)      action_find();
+}
+
+/* Once per main-loop iteration: connect, dispatch clicks, republish on change,
+ * and tear the connection down when the option is switched off. */
+static void hisashi_flush(Doc *d) {
+    if (!g_opts.hisashi_menubar) {
+        if (g_hoswl.inited) hoswl_shutdown(&g_hoswl);   /* sends "bye" if connected */
+        g_hoswl_fingerprint = 0;
+        return;
+    }
+    if (!g_hoswl.inited)
+        hoswl_init(&g_hoswl, "com.fezcode.typewriter", "Typewriter", TYPEWRITER_VERSION);
+    int was = hoswl_connected(&g_hoswl);
+    const char *id;
+    while ((id = hoswl_poll(&g_hoswl)) != NULL) hisashi_dispatch(id, d);
+    unsigned fp = hisashi_fingerprint();
+    if (fp != g_hoswl_fingerprint || (!was && hoswl_connected(&g_hoswl))) {
+        g_hoswl_fingerprint = fp;
+        hisashi_publish();
+    }
+}
+
+static void hisashi_shutdown(void) {
+    if (g_hoswl.inited) hoswl_shutdown(&g_hoswl);
+}
+#else
+static int  hisashi_active(void)   { return 0; }
+static void hisashi_flush(Doc *d)  { (void)d; }
+static void hisashi_shutdown(void) {}
+#endif
+
 static void handle_keydown(SDL_KeyboardEvent *ev, Doc *d) {
     /* Quit dialog intercepts all input */
     if (g_quit_dialog) {
@@ -1667,60 +1878,16 @@ static void handle_keydown(SDL_KeyboardEvent *ev, Doc *d) {
     /* Ctrl shortcuts */
     if (ctrl) {
         switch (ev->keysym.sym) {
-        case SDLK_f:
-            g_find_dialog = 1;
-            g_find_focus = 0;
-            g_need_redraw = 1;
-            return;
-        case SDLK_k:
-            menu_toggle();
-            return;
-        case SDLK_q:
-            try_quit(d);
-            return;
-        case SDLK_s:
-            if (d->filepath[0] == '\0') {
-                char path[MAX_PATH_LEN] = {0};
-                if (file_dialog_save(path, sizeof(path)) == 0) {
-                    snprintf(d->filepath, MAX_PATH_LEN, "%s", path);
-                }
-            }
-            if (doc_save(d) == 0) {
-                g_need_redraw = 1;
-            }
-            return;
-        case SDLK_o: {
-            char path[MAX_PATH_LEN] = {0};
-            if (file_dialog_open(path, sizeof(path)) == 0) {
-                doc_load(d, path);
-                g_need_redraw = 1;
-            }
-            return;
-        }
-        case SDLK_z:
-            undo_pop(d);
-            doc_scroll_to_cursor(d);
-            return;
-        case SDLK_c:
-            clipboard_copy(d);
-            return;
-        case SDLK_x:
-            clipboard_copy(d);
-            sel_delete(d);
-            g_need_redraw = 1;
-            return;
-        case SDLK_v:
-            clipboard_paste(d);
-            doc_scroll_to_cursor(d);
-            g_need_redraw = 1;
-            return;
-        case SDLK_a:
-            d->sel_active = 1;
-            d->sel_ax = 0; d->sel_ay = 0;
-            d->cy = d->count - 1;
-            d->cx = d->lines[d->cy].len;
-            g_need_redraw = 1;
-            return;
+        case SDLK_f: action_find();       return;
+        case SDLK_k: menu_toggle();       return;
+        case SDLK_q: try_quit(d);         return;
+        case SDLK_s: action_save(d);      return;
+        case SDLK_o: action_open(d);      return;
+        case SDLK_z: action_undo(d);      return;
+        case SDLK_c: action_copy(d);      return;
+        case SDLK_x: action_cut(d);       return;
+        case SDLK_v: action_paste(d);     return;
+        case SDLK_a: action_select_all(d); return;
         case SDLK_HOME:
             d->cy = 0; d->cx = 0;
             doc_scroll_to_cursor(d);
@@ -2015,7 +2182,8 @@ int main(int argc, char *argv[]) {
     while (g_running) {
         SDL_Event ev;
         /* Wait for events to save CPU, but wake up for cursor blink */
-        int has_event = SDL_WaitEventTimeout(&ev, CURSOR_BLINK_MS / 2);
+        /* ...and poll the Hisashi menubar more often while it is connected */
+        int has_event = SDL_WaitEventTimeout(&ev, hisashi_active() ? 100 : CURSOR_BLINK_MS / 2);
 
         if (has_event) {
             do {
@@ -2053,10 +2221,13 @@ int main(int argc, char *argv[]) {
             } while (SDL_PollEvent(&ev));
         }
 
+        hisashi_flush(&g_doc);   /* Hisashi menubar: connect, publish, run clicks */
+
         /* Always redraw for cursor blink (cheap with vsync) */
         render(&g_doc);
     }
 
+    hisashi_shutdown();
     SDL_StopTextInput();
     doc_free(&g_doc);
     sound_cleanup();

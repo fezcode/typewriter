@@ -63,7 +63,7 @@ all: $(TARGET)
 typewriter_res.o: typewriter.rc icon.ico
 	$(WINDRES) typewriter.rc -o typewriter_res.o
 
-$(TARGET): main.c font_embed.h $(RES)
+$(TARGET): main.c font_embed.h hoswl.h $(RES)
 	$(CC) $(CFLAGS) $(SDL_CFLAGS) -o $@ main.c $(RES) $(SDL_LIBS) $(LDFLAGS) -lm
 
 # Static SDL2 + SDL2_ttf for STATIC=1 builds on Linux/macOS
