@@ -18,8 +18,9 @@ support_url = "https://github.com/fezcode/typewriter/issues"
 comments    = "A distraction-free text editor with the soul of a mechanical typewriter."
 
 [ui]
-# vellum = paper and ink, which is what the app itself looks like.
-theme        = "vellum"
+# mica = the Windows 11 look (same as Descry and Atelier), so setup feels
+# native rather than branded.
+theme        = "mica"
 window_title = "Typewriter ${app.version} Setup"
 
 [install]
