@@ -27,3 +27,6 @@ dist/
 
 # Static SDL2/SDL2_ttf built by scripts/build-deps.sh
 deps/
+
+# Per-user settings written next to the executable
+typewriter.ini
