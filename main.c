@@ -5,7 +5,7 @@
  * Build: make  (or)  gcc -O2 main.c -o typewriter $(pkg-config --cflags --libs sdl2 SDL2_ttf) -lm
  */
 
-#define TYPEWRITER_VERSION "0.2.0"
+#define TYPEWRITER_VERSION "0.3.0"
 
 #include <SDL.h>
 #include <SDL_ttf.h>

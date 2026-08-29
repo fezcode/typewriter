@@ -30,3 +30,6 @@ deps/
 
 # Per-user settings written next to the executable
 typewriter.ini
+
+# Crash dump left behind by MSYS2 bash
+/bash.exe.stackdump
