@@ -21,3 +21,9 @@ obj/
 .Trashes
 ehthumbs.db
 Thumbs.db
+# Build outputs
+/typewriter
+dist/
+
+# Static SDL2/SDL2_ttf built by scripts/build-deps.sh
+deps/

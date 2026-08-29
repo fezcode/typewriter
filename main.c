@@ -18,6 +18,7 @@
 #include "snd_space.h"
 #include "snd_backspace.h"
 #include "snd_bell.h"
+#include "font_embed.h"
 
 /* ── Configuration ─────────────────────────────────────────────── */
 
@@ -796,7 +797,17 @@ static TTF_Font *load_font(int size) {
         if (f) return f;
     }
 
-    /* Try system fonts */
+    /* Use the font embedded in the binary (font_embed.h). freesrc=1 hands
+     * the RWops to SDL_ttf, which closes it when the font is closed. */
+    {
+        SDL_RWops *rw = SDL_RWFromConstMem(font_embed_data, (int)font_embed_len);
+        if (rw) {
+            TTF_Font *f = TTF_OpenFontRW(rw, 1, size);
+            if (f) return f;
+        }
+    }
+
+    /* Last resort: system fonts */
     for (int i = 0; font_candidates[i]; i++) {
         TTF_Font *f = TTF_OpenFont(font_candidates[i], size);
         if (f) return f;
@@ -1966,7 +1977,7 @@ int main(int argc, char *argv[]) {
     /* Load UI font (fixed size) */
     g_ui_font = load_font(18);
     if (!g_ui_font) {
-        fprintf(stderr, "Could not load UI font. Place 'typewriter.ttf' next to the executable\n");
+        fprintf(stderr, "Could not load UI font: %s\n", TTF_GetError());
         SDL_DestroyRenderer(g_ren); SDL_DestroyWindow(g_win);
         TTF_Quit(); SDL_Quit();
         return 1;

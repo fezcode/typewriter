@@ -1,0 +1,136 @@
+name: Build
+
+# Builds self-contained typewriter executables for Windows, Linux and macOS.
+# Every push / PR produces downloadable artifacts; pushing a tag like v0.3.0
+# additionally attaches the binaries to a GitHub release.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x86_64
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-make
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-SDL2
+            mingw-w64-x86_64-SDL2_ttf
+      - name: Build
+        run: mingw32-make STATIC=1
+      - name: Verify self-contained
+        run: |
+          # GUI-subsystem exe: --version prints nothing to a pipe, but a missing
+          # DLL or a crash would still surface as a non-zero exit code.
+          ./typewriter.exe --version
+          echo "--- imported DLLs:"
+          objdump -p typewriter.exe | grep 'DLL Name'
+          if objdump -p typewriter.exe | grep 'DLL Name' | grep -iE 'SDL2|freetype|harfbuzz|libgcc|libwinpthread|libstdc'; then
+            echo "::error::executable still depends on non-system DLLs"; exit 1
+          fi
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp typewriter.exe dist/typewriter-windows-x86_64.exe
+      - uses: actions/upload-artifact@v4
+        with:
+          name: typewriter-windows-x86_64
+          path: dist/*
+
+  linux:
+    name: Linux x86_64
+    runs-on: ubuntu-latest
+    # Build inside Ubuntu 22.04 so the binary only needs glibc >= 2.35.
+    container: ubuntu:22.04
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake curl ca-certificates tar xz-utils pkg-config \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxfixes-dev libxss-dev \
+            libxkbcommon-dev libwayland-dev wayland-protocols libdecor-0-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libasound2-dev libpulse-dev libpipewire-0.3-dev \
+            libdbus-1-dev libudev-dev libdrm-dev libgbm-dev libibus-1.0-dev
+      - uses: actions/checkout@v4
+      - name: Build static SDL2 + SDL2_ttf
+        run: sh scripts/build-deps.sh
+      - name: Build
+        run: make STATIC=1
+      - name: Verify self-contained
+        run: |
+          ./typewriter --version
+          echo "--- shared library dependencies:"
+          ldd typewriter
+          if ldd typewriter | grep -iE 'SDL2|freetype|harfbuzz'; then
+            echo "::error::executable still depends on SDL2/FreeType shared libraries"; exit 1
+          fi
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -C . -czf dist/typewriter-linux-x86_64.tar.gz typewriter
+      - uses: actions/upload-artifact@v4
+        with:
+          name: typewriter-linux-x86_64
+          path: dist/*
+
+  macos:
+    name: macOS universal
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build static SDL2 + SDL2_ttf (arm64 + x86_64)
+        run: sh scripts/build-deps.sh
+      - name: Build
+        run: make STATIC=1
+      - name: Verify self-contained
+        run: |
+          ./typewriter --version
+          echo "--- architectures:"
+          lipo -info typewriter
+          echo "--- shared library dependencies:"
+          otool -L typewriter
+          if otool -L typewriter | grep -iE 'SDL2|freetype|harfbuzz'; then
+            echo "::error::executable still depends on SDL2/FreeType dylibs"; exit 1
+          fi
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -C . -czf dist/typewriter-macos-universal.tar.gz typewriter
+      - uses: actions/upload-artifact@v4
+        with:
+          name: typewriter-macos-universal
+          path: dist/*
+
+  release:
+    name: GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: ls -la dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

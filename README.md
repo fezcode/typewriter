@@ -10,9 +10,9 @@ Built in C with SDL2 — fast, lightweight, cross-platform. Every keystroke clic
 
 - **Real typewriter sounds** — recorded mechanical key strikes, embedded directly in the binary. Supports concurrent/overlapping playback for a true tactile feel.
 - **Paper aesthetic** — Multiple themes including Classic Cream, Dark Mode, and Terminal Green.
-- **Lightweight** — single C file, ~750KB binary, near-zero CPU at idle.
+- **Lightweight** — single C file, near-zero CPU at idle.
 - **Cross-platform** — Windows, macOS, Linux.
-- **No dependencies at runtime** — everything is embedded (sounds, icon).
+- **Self-contained** — one executable, nothing to install: sounds, icon and the typewriter font are embedded, and SDL2 is linked in statically.
 - **Find & Replace** — Built-in search and replace functionality with a custom dialog (`Ctrl+F`).
 - **Settings Persistence** — Automatically saves your preferences (sounds, line numbers, theme) to `typewriter.ini`.
 - **File Support** — Open and save `.txt`, `.md`, and `.ini` files using native system dialogs.
@@ -22,9 +22,23 @@ Built in C with SDL2 — fast, lightweight, cross-platform. Every keystroke clic
 
 ![Screenshot](./example.png)
 
+## Download
+
+Prebuilt self-contained executables are attached to each [GitHub release](https://github.com/fezcode/typewriter/releases):
+
+| File | Platform |
+|------|----------|
+| `typewriter-windows-x86_64.exe` | Windows 10/11 (64-bit) — just run it |
+| `typewriter-linux-x86_64.tar.gz` | Linux x86_64, glibc ≥ 2.35 (Ubuntu 22.04+, Fedora 36+, …) — `tar xzf` and run `./typewriter` |
+| `typewriter-macos-universal.tar.gz` | macOS 11+ on Apple Silicon and Intel — `tar xzf` and run `./typewriter` |
+
+The binaries are not code-signed. On macOS, Gatekeeper may refuse to open a downloaded copy; run `xattr -d com.apple.quarantine typewriter` once to clear the quarantine flag.
+
+Settings are stored in `typewriter.ini` next to the executable, so keep it in a writable folder.
+
 ## Build
 
-Requires SDL2 and SDL2_ttf development libraries.
+Requires SDL2 and SDL2_ttf development libraries for the default (dynamically linked) build.
 
 **Windows (MSYS2/MinGW)**
 
@@ -46,6 +60,27 @@ make
 sudo apt install libsdl2-dev libsdl2-ttf-dev
 make
 ```
+
+### Self-contained build
+
+`make STATIC=1` links SDL2, SDL2_ttf and FreeType into the executable so it runs on a machine with nothing else installed.
+
+**Windows (MSYS2/MinGW)** — the MSYS2 packages above already include the static libraries:
+
+```sh
+mingw32-make STATIC=1
+```
+
+**Linux / macOS** — first build static SDL2 and SDL2_ttf into `deps/` (needs `cmake`, a C/C++ compiler and `curl`; on Linux also the X11/Wayland/ALSA/PulseAudio `-dev` packages listed at the top of `scripts/build-deps.sh`):
+
+```sh
+make deps        # once; downloads and builds SDL2 + SDL2_ttf statically
+make STATIC=1
+```
+
+On macOS this produces a universal (arm64 + x86_64) binary. On Linux the result depends only on glibc; SDL2 loads X11/Wayland and audio backends from the system at runtime.
+
+The same steps run in GitHub Actions (`.github/workflows/release.yml`) for every push, and pushing a `v*` tag publishes the three binaries as a release.
 
 ## Usage
 
@@ -89,10 +124,12 @@ Options:
 
 ## Fonts
 
-Typewriter searches for system monospace fonts automatically. For a specific typewriter font, either:
+The [Special Elite](https://fonts.google.com/specimen/Special+Elite) typewriter font (Apache 2.0) is embedded in the executable, so no font files are needed. To use a different font instead, either:
 
 - Place `typewriter.ttf` next to the executable
 - Set the `TYPEWRITER_FONT` environment variable to a `.ttf` path
+
+Both take precedence over the embedded font. To change the embedded font itself, replace `typewriter.ttf` in the source tree and run `make embed-font` (needs `xxd`) before building.
 
 ## License
 
