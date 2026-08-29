@@ -45,14 +45,16 @@ download() { # url dest
   fi
 }
 
-# Platform-specific CMake settings
-EXTRA_CMAKE=""
+# Platform-specific CMake settings. CMAKE_POLICY_VERSION_MINIMUM keeps CMake 4
+# from refusing the old cmake_minimum_required() in SDL_ttf's vendored FreeType
+# (ignored by older CMake).
+EXTRA_CMAKE="-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
 ARCHFLAGS=""
 case "$(uname -s)" in
   Darwin)
     MACOS_ARCHS=${MACOS_ARCHS:-"arm64;x86_64"}
     MACOSX_DEPLOYMENT_TARGET=${MACOSX_DEPLOYMENT_TARGET:-11.0}
-    EXTRA_CMAKE="-DCMAKE_OSX_ARCHITECTURES=$MACOS_ARCHS -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
+    EXTRA_CMAKE="$EXTRA_CMAKE -DCMAKE_OSX_ARCHITECTURES=$MACOS_ARCHS -DCMAKE_OSX_DEPLOYMENT_TARGET=$MACOSX_DEPLOYMENT_TARGET"
     for a in $(echo "$MACOS_ARCHS" | tr ';' ' '); do ARCHFLAGS="$ARCHFLAGS -arch $a"; done
     ARCHFLAGS="$ARCHFLAGS -mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
     ;;
