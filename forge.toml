@@ -7,7 +7,7 @@
 
 [app]
 name    = "Typewriter"
-version = "0.3.0"
+version = "0.3.1"
 id      = "com.fezcode.typewriter"
 icon    = "icon.ico"
 
@@ -30,7 +30,10 @@ window_title = "Typewriter ${app.version} Setup"
 default_dir = "${LOCALAPPDATA}/Programs/Typewriter"
 
 [uninstall]
-keep = ["typewriter.ini"]
+keep          = ["typewriter.ini"]
+# typewriter.ini lives in the install folder, so that folder is the "settings dir":
+# it is only removed when the user ticks "Also remove my settings and data".
+settings_dirs = ["${INSTALLDIR}"]
 
 # --- wizard -----------------------------------------------------------------
 
