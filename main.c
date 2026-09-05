@@ -5,10 +5,11 @@
  * Build: make  (or)  gcc -O2 main.c -o typewriter $(pkg-config --cflags --libs sdl2 SDL2_ttf) -lm
  */
 
-#define TYPEWRITER_VERSION "0.3.2"
+#define TYPEWRITER_VERSION "0.4.0"
 
 #include <SDL.h>
 #include <SDL_ttf.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,23 +50,36 @@ typedef struct {
     SDL_Color sel_bg;
     SDL_Color notebook_line;
     SDL_Color notebook_margin;
+    /* Paper effects. Each alpha is how dark the mark gets where it is
+     * strongest, so a theme dials the whole effect up or down on its own. */
+    SDL_Color stain;        /* dried coffee */
+    SDL_Color ink;          /* spilled ink */
+    SDL_Color crease;       /* the shadowed side of a fold */
+    SDL_Color crease_hi;    /* the side catching the light */
+    SDL_Color grain;        /* the tooth of the paper itself */
 } Theme;
 
 static const Theme g_themes[] = {
     { /* 0: Cream / Classic */
       { 245, 240, 230, 255 }, { 44, 44, 44, 255 }, { 180, 40, 40, 200 },
       { 180, 175, 165, 255 }, { 60, 58, 54, 255 }, { 210, 205, 195, 255 },
-      { 180, 210, 230, 255 }, { 195, 215, 230, 255 }, { 220, 140, 140, 180 }
+      { 180, 210, 230, 255 }, { 195, 215, 230, 255 }, { 220, 140, 140, 180 },
+      { 122, 78, 38, 30 }, { 30, 34, 74, 105 }, { 146, 138, 122, 30 }, { 255, 253, 247, 34 },
+      { 168, 158, 138, 26 }
     },
     { /* 1: Dark Mode */
       { 30, 30, 30, 255 }, { 220, 220, 220, 255 }, { 200, 80, 80, 200 },
       { 100, 100, 100, 255 }, { 45, 45, 45, 255 }, { 180, 180, 180, 255 },
-      { 60, 90, 120, 255 }, { 50, 50, 50, 255 }, { 100, 60, 60, 180 }
+      { 60, 90, 120, 255 }, { 50, 50, 50, 255 }, { 100, 60, 60, 180 },
+      { 156, 112, 62, 24 }, { 8, 8, 14, 130 }, { 8, 8, 8, 70 }, { 78, 76, 72, 34 },
+      { 92, 88, 82, 20 }
     },
     { /* 2: Terminal Green */
       { 10, 10, 10, 255 }, { 50, 200, 50, 255 }, { 50, 200, 50, 200 },
       { 30, 120, 30, 255 }, { 20, 20, 20, 255 }, { 40, 160, 40, 255 },
-      { 30, 80, 30, 255 }, { 20, 40, 20, 255 }, { 20, 40, 20, 180 }
+      { 30, 80, 30, 255 }, { 20, 40, 20, 255 }, { 20, 40, 20, 180 },
+      { 40, 120, 40, 20 }, { 24, 76, 24, 80 }, { 16, 44, 16, 30 }, { 44, 104, 44, 26 },
+      { 30, 74, 30, 16 }
     }
 };
 #define THEME_COUNT 3
@@ -141,13 +155,14 @@ typedef struct {
     int show_notebook_lines;
     int theme_idx;
     int font_size;
+    int paper_effects;      /* coffee rings, ink spills and creases */
     int hisashi_menubar;    /* Windows: publish menus to Hisashi's menubar */
 } Options;
 
 #ifdef _WIN32
-#define MENU_ITEM_COUNT 6   /* last row: Hisashi menubar (Windows only) */
+#define MENU_ITEM_COUNT 7   /* last row: Hisashi menubar (Windows only) */
 #else
-#define MENU_ITEM_COUNT 5
+#define MENU_ITEM_COUNT 6
 #endif
 
 static const char *menu_labels[MENU_ITEM_COUNT] = {
@@ -156,6 +171,7 @@ static const char *menu_labels[MENU_ITEM_COUNT] = {
     "Notebook lines",
     "Theme",
     "Font size",
+    "Paper effects",
 #ifdef _WIN32
     "Hisashi menubar",
 #endif
@@ -174,7 +190,7 @@ static int           g_ui_char_h;
 static int           g_running = 1;
 static int           g_need_redraw = 1;
 static Doc           g_doc;
-static Options       g_opts = { 1, 1, 0, 0, 18, 0 }; /* sound=on, lnums=on, lines=off, theme=cream, font=18, hisashi=off */
+static Options       g_opts = { 1, 1, 0, 0, 18, 0, 0 }; /* sound=on, lnums=on, lines=off, theme=cream, font=18, paper=off, hisashi=off */
 static int           g_menu_open = 0;
 static int           g_menu_sel  = 0;
 static int           g_quit_dialog = 0; /* save-before-quit dialog */
@@ -853,9 +869,384 @@ static int *menu_opt_ptr(int idx) {
     case 1: return &g_opts.show_line_numbers;
     case 2: return &g_opts.show_notebook_lines;
     case 3: return &g_opts.theme_idx;
-    case 5: return &g_opts.hisashi_menubar;
+    case 5: return &g_opts.paper_effects;
+    case 6: return &g_opts.hisashi_menubar;
     default: return NULL;
     }
+}
+
+/* ── Paper effects ─────────────────────────────────────────────── */
+/*
+ * Coffee rings, ink spills and creases, drawn pixel by pixel into an RGBA
+ * surface and kept as one texture that render() lays over the paper, under
+ * the text. The seed is fixed, so it is the same sheet of paper every launch
+ * rather than a fresh mess each time, and the texture is rebuilt only when
+ * the window or the theme changes — never per frame.
+ */
+
+#define PE_SEED         0x7EA5C0FFu
+#define PE_RING_COUNT   2
+#define PE_BLOT_COUNT   4
+#define PE_CREASE_COUNT 3
+#define PE_DROPS_MAX    3       /* satellite droplets thrown clear of a spill */
+#define PE_TWO_PI       6.2831853f
+
+/* Positions are fractions of the window, radii fractions of its shorter side,
+ * so the marks keep their place and proportion when the window is resized. */
+static const float PE_RINGS[PE_RING_COUNT][3] = {
+    { 0.79f, 0.21f, 0.115f },
+    { 0.15f, 0.74f, 0.088f },
+};
+static const float PE_BLOTS[PE_BLOT_COUNT][3] = {
+    { 0.955f, 0.61f, 0.020f },
+    { 0.062f, 0.29f, 0.014f },
+    { 0.470f, 0.93f, 0.016f },
+    { 0.700f, 0.46f, 0.010f },
+};
+static const float PE_CREASES[PE_CREASE_COUNT][4] = {
+    { -0.05f, 0.335f, 1.05f, 0.305f },
+    { -0.05f, 0.700f, 1.05f, 0.745f },
+    {  0.63f, -0.05f, 0.66f, 1.05f  },
+};
+
+typedef struct {
+    float cx, cy, r;
+    float squash;   /* >1 flattens it vertically: a cup seen at an angle */
+    float seed;     /* offset into noise space, so no two marks are alike */
+} PeBlob;
+
+typedef struct {
+    float x0, y0, x1, y1;
+    float wob_amp, wob_freq, wob_phase;
+    float seed;
+} PeCrease;
+
+static SDL_Texture *g_paper_tex;
+static int g_paper_w = 0, g_paper_h = 0, g_paper_theme = -1;
+static unsigned g_pe_rng = PE_SEED;
+
+static unsigned pe_next(void) {
+    g_pe_rng ^= g_pe_rng << 13;
+    g_pe_rng ^= g_pe_rng >> 17;
+    g_pe_rng ^= g_pe_rng << 5;
+    return g_pe_rng;
+}
+
+static float pe_rand(float lo, float hi) {
+    return lo + (hi - lo) * ((float)(pe_next() & 0xFFFFFF) / 16777216.0f);
+}
+
+/* Value noise. Everything irregular here is built out of this: smooth
+ * analytic curves are exactly what makes a generated stain look generated,
+ * so no edge and no density in this section is left as a clean function. */
+static float pe_hash(int x, int y) {
+    unsigned h = (unsigned)x * 374761393u + (unsigned)y * 668265263u;
+    h = (h ^ (h >> 13)) * 1274126177u;
+    return (float)((h ^ (h >> 16)) & 0xFFFFFFu) / 16777216.0f;
+}
+
+static float pe_noise(float x, float y) {
+    float fx = floorf(x), fy = floorf(y);
+    int   xi = (int)fx,   yi = (int)fy;
+    float xf = x - fx,    yf = y - fy;
+    float u = xf * xf * (3.0f - 2.0f * xf);
+    float v = yf * yf * (3.0f - 2.0f * yf);
+    float a = pe_hash(xi, yi),     b = pe_hash(xi + 1, yi);
+    float c = pe_hash(xi, yi + 1), d = pe_hash(xi + 1, yi + 1);
+    float ab = a + (b - a) * u;
+    float cd = c + (d - c) * u;
+    return ab + (cd - ab) * v;
+}
+
+/* Fractal noise: octaves of the above, each finer and fainter. Roughly 0..1. */
+static float pe_fbm(float x, float y, int octaves) {
+    float sum = 0.0f, amp = 0.5f, norm = 0.0f, f = 1.0f;
+    for (int i = 0; i < octaves; i++) {
+        sum  += amp * pe_noise(x * f, y * f);
+        norm += amp;
+        f    *= 2.0f;
+        amp  *= 0.5f;
+    }
+    return norm > 0.0f ? sum / norm : 0.0f;
+}
+
+/* Noise sampled around a circle in noise space, so it wraps seamlessly with
+ * the angle instead of showing a seam where 2π meets 0. */
+static float pe_ring_noise(float seed, float th, float scale, int octaves) {
+    return pe_fbm(seed + cosf(th) * scale, seed + sinf(th) * scale, octaves);
+}
+
+static void pe_blob_init(PeBlob *b, float cx, float cy, float r, float squash) {
+    b->cx     = cx;
+    b->cy     = cy;
+    b->r      = r;
+    b->squash = squash;
+    b->seed   = pe_rand(0.0f, 128.0f);
+}
+
+/* Source-over one mark's colour onto the overlay. */
+static void pe_plot(SDL_Surface *s, int x, int y, SDL_Color col, float cov) {
+    if (cov <= 0.0f || x < 0 || y < 0 || x >= s->w || y >= s->h) return;
+    if (cov > 1.0f) cov = 1.0f;
+
+    float sa = (col.a / 255.0f) * cov;
+    if (sa <= 0.0f) return;
+
+    Uint32 *px = (Uint32 *)((Uint8 *)s->pixels + y * s->pitch) + x;
+    Uint8 dr, dg, db, da;
+    SDL_GetRGBA(*px, s->format, &dr, &dg, &db, &da);
+
+    float dfa = da / 255.0f;
+    float oa  = sa + dfa * (1.0f - sa);
+    if (oa <= 0.0f) return;
+    float orr = (col.r * sa + dr * dfa * (1.0f - sa)) / oa;
+    float og  = (col.g * sa + dg * dfa * (1.0f - sa)) / oa;
+    float ob  = (col.b * sa + db * dfa * (1.0f - sa)) / oa;
+
+    *px = SDL_MapRGBA(s->format, (Uint8)(orr + 0.5f), (Uint8)(og + 0.5f),
+                      (Uint8)(ob + 0.5f), (Uint8)(oa * 255.0f + 0.5f));
+}
+
+/* Bounding box of a mark, clipped to the surface. */
+static void pe_bounds(SDL_Surface *s, float cx, float cy, float r,
+                      int *x0, int *y0, int *x1, int *y1) {
+    *x0 = (int)(cx - r); if (*x0 < 0) *x0 = 0;
+    *y0 = (int)(cy - r); if (*y0 < 0) *y0 = 0;
+    *x1 = (int)(cx + r) + 1; if (*x1 > s->w - 1) *x1 = s->w - 1;
+    *y1 = (int)(cy + r) + 1; if (*y1 > s->h - 1) *y1 = s->h - 1;
+}
+
+static void pe_draw_ring(SDL_Surface *s, const PeBlob *b, SDL_Color col) {
+    int x0, y0, x1, y1;
+    pe_bounds(s, b->cx, b->cy, b->r * 1.45f, &x0, &y0, &x1, &y1);
+
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) {
+            float px = x + 0.5f, py = y + 0.5f;
+            float dx = px - b->cx, dy = (py - b->cy) * b->squash;
+            float d  = sqrtf(dx * dx + dy * dy);
+            if (d > b->r * 1.35f) continue;
+            float th = atan2f(dy, dx);
+
+            /* The rim wanders, but only just. Coarse noise here scallops the
+             * ring into a cog: the asymmetry wants to be gentle and the
+             * roughness fine. */
+            float lo = pe_ring_noise(b->seed, th, 1.1f, 2);
+            float hi = pe_ring_noise(b->seed + 19.0f, th, 6.0f, 3);
+            float rr = b->r * (0.93f + 0.10f * lo + 0.045f * hi);
+            if (rr <= 0.0f) continue;
+            float t = d / rr;
+            if (t > 1.12f) continue;
+
+            /* The tide line. A drying puddle carries its pigment to the edge,
+             * which is why a coffee stain is a ring and not a disc. */
+            float e   = (t - 0.96f) / 0.045f;
+            float cov = 1.25f * expf(-e * e);
+            /* A second, fainter ring: the cup was set down more than once. */
+            float e2  = (t - 0.58f) / 0.08f;
+            cov += 0.35f * expf(-e2 * e2);
+            /* The wash inside, thickening toward the rim. */
+            if (t < 1.0f) cov += 0.13f + 0.13f * t * t;
+            if (t > 1.0f) cov *= 1.0f - (t - 1.0f) / 0.12f;
+
+            /* Coffee pools thicker on one side and can dry away to nothing on
+             * another, so the rim is never one even band. Letting this reach
+             * zero is what breaks the ring open. */
+            float dens = 1.5f * pe_ring_noise(b->seed + 37.0f, th, 1.5f, 3) - 0.22f;
+            if (dens <= 0.0f) continue;
+            cov *= dens;
+
+            /* Grain through the body, so the wash is not a clean gradient. */
+            cov *= 0.55f + 0.9f * pe_fbm(px * 0.085f + b->seed,
+                                         py * 0.085f + b->seed, 3);
+
+            pe_plot(s, x, y, col, cov);
+        }
+    }
+}
+
+static void pe_draw_blot(SDL_Surface *s, const PeBlob *b, SDL_Color col) {
+    int x0, y0, x1, y1;
+    pe_bounds(s, b->cx, b->cy, b->r * 2.1f, &x0, &y0, &x1, &y1);
+
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) {
+            float px = x + 0.5f, py = y + 0.5f;
+            float dx = px - b->cx, dy = (py - b->cy) * b->squash;
+            float d  = sqrtf(dx * dx + dy * dy);
+            if (d > b->r * 1.4f) continue;
+            float th = atan2f(dy, dx);
+
+            /* Ink spreads along whichever fibres it finds, so the outline is
+             * lobed and ragged — but a blot is still a blot. Swing the radius
+             * too hard and it turns into an asterisk. */
+            float lo = pe_ring_noise(b->seed, th, 1.4f, 2);
+            float hi = pe_ring_noise(b->seed + 23.0f, th, 5.5f, 3);
+            float rr = b->r * (0.62f + 0.55f * lo + 0.14f * hi);
+            if (rr <= 0.0f || d > rr) continue;
+
+            /* Soaked through nearly to the edge, then a quick drop where the
+             * wicking stops. Feather it instead and it reads as dust. */
+            float t   = d / rr;
+            float cov = 1.0f - t * t * t * t;
+            /* Unevenly soaked: thinner where the paper drank less. */
+            cov *= 0.68f + 0.55f * pe_fbm(px * 0.22f + b->seed,
+                                          py * 0.22f + b->seed, 3);
+
+            pe_plot(s, x, y, col, cov);
+        }
+    }
+}
+
+/* A faint tooth over the whole sheet. On its own it is barely visible, but it
+ * is what stops the marks from looking painted onto a flat colour. */
+static void pe_draw_grain(SDL_Surface *s, SDL_Color col) {
+    for (int y = 0; y < s->h; y++) {
+        for (int x = 0; x < s->w; x++) {
+            float n = pe_fbm(x * 0.55f, y * 0.55f, 2) * 0.6f
+                    + pe_fbm(x * 0.06f, y * 0.06f, 3) * 0.4f;
+            float cov = n - 0.42f;          /* only the high side shows */
+            if (cov <= 0.0f) continue;
+            pe_plot(s, x, y, col, cov * 0.55f);
+        }
+    }
+}
+
+static void pe_draw_crease(SDL_Surface *s, const PeCrease *c,
+                           SDL_Color shadow, SDL_Color light) {
+    float vx = c->x1 - c->x0, vy = c->y1 - c->y0;
+    float len = sqrtf(vx * vx + vy * vy);
+    if (len < 1.0f) return;
+    float nx = -vy / len, ny = vx / len;
+
+    const float w     = 5.0f;    /* the fold itself */
+    const float broad = 30.0f;   /* the sheet bending away either side of it */
+    float pad = broad + c->wob_amp + 2.0f;
+    int x0 = (int)(fminf(c->x0, c->x1) - pad), x1 = (int)(fmaxf(c->x0, c->x1) + pad);
+    int y0 = (int)(fminf(c->y0, c->y1) - pad), y1 = (int)(fmaxf(c->y0, c->y1) + pad);
+    if (x0 < 0) x0 = 0;
+    if (y0 < 0) y0 = 0;
+    if (x1 > s->w - 1) x1 = s->w - 1;
+    if (y1 > s->h - 1) y1 = s->h - 1;
+
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x <= x1; x++) {
+            float px = x + 0.5f, py = y + 0.5f;
+            float t  = ((px - c->x0) * vx + (py - c->y0) * vy) / (len * len);
+            if (t < 0.0f || t > 1.0f) continue;
+
+            /* Signed distance from the fold, which wanders as it goes: a low
+             * harmonic for the overall sweep, noise on top so it is never a
+             * ruled line. */
+            float wob = c->wob_amp * sinf(c->wob_freq * t + c->wob_phase)
+                      + c->wob_amp * 1.1f * (pe_fbm(t * 9.0f + c->seed, c->seed, 3) - 0.5f);
+            float sd  = (px - c->x0) * nx + (py - c->y0) * ny - wob;
+            float ad  = fabsf(sd);
+            if (ad > broad) continue;
+
+            /* A crease is not equally sharp along its length — it presses hard
+             * in places and all but disappears in others. */
+            float along = 0.30f + 1.5f * pe_fbm(t * 7.0f + c->seed + 51.0f, c->seed, 3);
+            /* Fade the ends so the fold runs off the sheet, not into a full stop. */
+            float ends = 1.0f;
+            if (t < 0.10f)      ends = t / 0.10f;
+            else if (t > 0.90f) ends = (1.0f - t) / 0.10f;
+            along *= ends;
+            if (along <= 0.0f) continue;
+
+            /* A fold has a shadowed side and a lit one; that is what sells it.
+             * The broad band is the sheet curving away, the core is the crease
+             * itself, and the two together read as paper rather than a line. */
+            if (ad <= broad) {
+                float cb = (1.0f - ad / broad);
+                pe_plot(s, x, y, sd < 0.0f ? shadow : light, cb * cb * 0.30f * along);
+            }
+            if (ad <= w) {
+                float cc = 1.0f - ad / w;
+                pe_plot(s, x, y, sd < 0.0f ? shadow : light, cc * cc * along);
+            }
+        }
+    }
+}
+
+static void paper_effects_free(void) {
+    if (g_paper_tex) SDL_DestroyTexture(g_paper_tex);
+    g_paper_tex   = NULL;
+    g_paper_w     = 0;
+    g_paper_h     = 0;
+    g_paper_theme = -1;
+}
+
+static void paper_effects_build(int w, int h, int theme_idx) {
+    if (g_paper_tex) SDL_DestroyTexture(g_paper_tex);
+    g_paper_tex = NULL;
+    /* Recorded even if the build fails below, so a failure costs one attempt
+     * rather than one per frame. */
+    g_paper_w     = w;
+    g_paper_h     = h;
+    g_paper_theme = theme_idx;
+    if (w <= 0 || h <= 0) return;
+
+    SDL_Surface *s = SDL_CreateRGBSurfaceWithFormat(0, w, h, 32, SDL_PIXELFORMAT_RGBA32);
+    if (!s) return;
+    SDL_FillRect(s, NULL, SDL_MapRGBA(s->format, 0, 0, 0, 0));
+
+    const Theme *t = &g_themes[theme_idx];
+    float unit = (float)(w < h ? w : h);
+    g_pe_rng = PE_SEED;
+
+    /* Grain first: everything else settles onto it. */
+    pe_draw_grain(s, t->grain);
+
+    for (int i = 0; i < PE_CREASE_COUNT; i++) {
+        PeCrease c;
+        c.x0 = PE_CREASES[i][0] * w; c.y0 = PE_CREASES[i][1] * h;
+        c.x1 = PE_CREASES[i][2] * w; c.y1 = PE_CREASES[i][3] * h;
+        c.wob_amp   = pe_rand(3.0f, 7.0f);
+        c.wob_freq  = pe_rand(3.0f, 6.5f);
+        c.wob_phase = pe_rand(0.0f, PE_TWO_PI);
+        c.seed      = pe_rand(0.0f, 128.0f);
+        pe_draw_crease(s, &c, t->crease, t->crease_hi);
+    }
+
+    for (int i = 0; i < PE_RING_COUNT; i++) {
+        PeBlob b;
+        /* Cups are round; a ring on a page you are looking down at is not. */
+        pe_blob_init(&b, PE_RINGS[i][0] * w, PE_RINGS[i][1] * h,
+                     PE_RINGS[i][2] * unit, pe_rand(1.04f, 1.16f));
+        pe_draw_ring(s, &b, t->stain);
+    }
+
+    for (int i = 0; i < PE_BLOT_COUNT; i++) {
+        float bx = PE_BLOTS[i][0] * w, by = PE_BLOTS[i][1] * h;
+        float br = PE_BLOTS[i][2] * unit;
+        PeBlob b;
+        pe_blob_init(&b, bx, by, br, pe_rand(0.85f, 1.25f));
+        pe_draw_blot(s, &b, t->ink);
+
+        int drops = (int)pe_rand(1.0f, PE_DROPS_MAX + 0.999f);
+        for (int k = 0; k < drops; k++) {
+            float ang  = pe_rand(0.0f, PE_TWO_PI);
+            float dist = pe_rand(1.8f, 5.0f) * br;
+            PeBlob drop;
+            pe_blob_init(&drop, bx + cosf(ang) * dist, by + sinf(ang) * dist,
+                         br * pe_rand(0.10f, 0.30f), pe_rand(0.8f, 1.3f));
+            pe_draw_blot(s, &drop, t->ink);
+        }
+    }
+
+    g_paper_tex = SDL_CreateTextureFromSurface(g_ren, s);
+    SDL_FreeSurface(s);
+    if (g_paper_tex)
+        SDL_SetTextureBlendMode(g_paper_tex, SDL_BLENDMODE_BLEND);
+}
+
+static void paper_effects_draw(int w, int h, int theme_idx) {
+    if (!g_paper_tex || g_paper_w != w || g_paper_h != h || g_paper_theme != theme_idx)
+        paper_effects_build(w, h, theme_idx);
+    if (!g_paper_tex) return;
+    SDL_Rect dst = { 0, 0, w, h };
+    SDL_RenderCopy(g_ren, g_paper_tex, NULL, &dst);
 }
 
 static void render(Doc *d) {
@@ -868,6 +1259,11 @@ static void render(Doc *d) {
     /* Paper background */
     SDL_SetRenderDrawColor(g_ren, t->paper.r, t->paper.g, t->paper.b, 255);
     SDL_RenderClear(g_ren);
+
+    /* Marks on the paper go under everything else, so they never fight the
+     * text for legibility. */
+    if (g_opts.paper_effects)
+        paper_effects_draw(ww, wh, t_idx);
 
     int text_x = compute_text_x(d->count);
 
@@ -1347,6 +1743,7 @@ static void settings_save(void) {
     fprintf(f, "show_notebook_lines=%d\n", g_opts.show_notebook_lines);
     fprintf(f, "theme_idx=%d\n", g_opts.theme_idx);
     fprintf(f, "font_size=%d\n", g_opts.font_size);
+    fprintf(f, "paper_effects=%d\n", g_opts.paper_effects);
     fprintf(f, "hisashi_menubar=%d\n", g_opts.hisashi_menubar);
     fclose(f);
 }
@@ -1358,6 +1755,7 @@ static void settings_load(void) {
     g_opts.show_notebook_lines = 0;
     g_opts.theme_idx = 0;
     g_opts.font_size = 18;
+    g_opts.paper_effects = 0;
     g_opts.hisashi_menubar = 0;
 
     char path[MAX_PATH_LEN];
@@ -1377,6 +1775,7 @@ static void settings_load(void) {
         if (sscanf(line, "sound_enabled=%d", &val) == 1) g_opts.sound_enabled = val;
         else if (sscanf(line, "show_line_numbers=%d", &val) == 1) g_opts.show_line_numbers = val;
         else if (sscanf(line, "show_notebook_lines=%d", &val) == 1) g_opts.show_notebook_lines = val;
+        else if (sscanf(line, "paper_effects=%d", &val) == 1) g_opts.paper_effects = val != 0;
         else if (sscanf(line, "hisashi_menubar=%d", &val) == 1) g_opts.hisashi_menubar = val != 0;
         else if (sscanf(line, "theme_idx=%d", &val) == 1) {
             g_opts.theme_idx = val;
@@ -1735,7 +2134,8 @@ static int hisashi_active(void) {
 /* FNV-1a over everything the published menu shows: checkmarks, theme, size. */
 static unsigned hisashi_fingerprint(void) {
     int vals[] = { g_opts.sound_enabled, g_opts.show_line_numbers,
-                   g_opts.show_notebook_lines, g_opts.theme_idx, g_opts.font_size };
+                   g_opts.show_notebook_lines, g_opts.theme_idx, g_opts.font_size,
+                   g_opts.paper_effects };
     unsigned h = 2166136261u;
     for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++)
         h = (h ^ (unsigned)(vals[i] + 1)) * 16777619u;
@@ -1770,11 +2170,13 @@ static void hisashi_publish(void) {
         " view.sound|Sound effects||%s\n"
         " view.lnums|Line numbers||%s\n"
         " view.notebook|Notebook lines||%s\n"
+        " view.paper|Paper effects||%s\n"
         " -\n"
         " view.theme|Theme|>\n",
         g_opts.sound_enabled ? "x" : "c",
         g_opts.show_line_numbers ? "x" : "c",
-        g_opts.show_notebook_lines ? "x" : "c");
+        g_opts.show_notebook_lines ? "x" : "c",
+        g_opts.paper_effects ? "x" : "c");
     for (int i = 0; i < THEME_COUNT; i++)
         PUT("  view.theme.%d|%s||%s\n", i, theme_names[i], g_opts.theme_idx == i ? "x" : "c");
     PUT(" -\n"
@@ -1801,6 +2203,7 @@ static void hisashi_dispatch(const char *id, Doc *d) {
     if (strcmp(id, "view.sound") == 0)        { option_toggle(0); return; }
     if (strcmp(id, "view.lnums") == 0)        { option_toggle(1); return; }
     if (strcmp(id, "view.notebook") == 0)     { option_toggle(2); return; }
+    if (strcmp(id, "view.paper") == 0)        { option_toggle(5); return; }
     if (sscanf(id, "view.theme.%d", &i) == 1) { if (i >= 0 && i < THEME_COUNT) option_set_theme(i); return; }
     if (strcmp(id, "view.font.larger") == 0)  { option_font_size_delta(+1); return; }
     if (strcmp(id, "view.font.smaller") == 0) { option_font_size_delta(-1); return; }
@@ -2229,6 +2632,7 @@ int main(int argc, char *argv[]) {
 
     hisashi_shutdown();
     SDL_StopTextInput();
+    paper_effects_free();
     doc_free(&g_doc);
     sound_cleanup();
     if (g_font) TTF_CloseFont(g_font);

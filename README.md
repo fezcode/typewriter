@@ -10,6 +10,7 @@ Built in C with SDL2 — fast, lightweight, cross-platform. Every keystroke clic
 
 - **Real typewriter sounds** — recorded mechanical key strikes, embedded directly in the binary. Supports concurrent/overlapping playback for a true tactile feel.
 - **Paper aesthetic** — Multiple themes including Classic Cream, Dark Mode, and Terminal Green.
+- **Paper effects** — optional coffee rings, ink spills and creases on the page, drawn procedurally and coloured to suit the theme. Off by default; switch it on in the Options menu.
 - **Lightweight** — single C file, near-zero CPU at idle.
 - **Cross-platform** — Windows, macOS, Linux.
 - **Self-contained** — one executable, nothing to install: sounds, icon and the typewriter font are embedded, and SDL2 is linked in statically.
@@ -123,7 +124,7 @@ Options:
 - **Left/Right / Space / Enter**: Cycle themes, change the font size, or toggle options
 - **Esc**: Close menu
 
-Rows: Sound effects · Line numbers · Notebook lines · Theme · Font size · Hisashi menubar (Windows only).
+Rows: Sound effects · Line numbers · Notebook lines · Theme · Font size · Paper effects · Hisashi menubar (Windows only).
 
 ### Find & Replace (`Ctrl+F`)
 - **Tab**: Switch between Find and Replace fields
@@ -144,10 +145,16 @@ Rows: Sound effects · Line numbers · Notebook lines · Theme · Font size · H
 |------|-------|
 | **File** | Open…, Save, Quit |
 | **Edit** | Undo, Cut, Copy, Paste, Select All, Find & Replace… |
-| **View** | Sound effects ✓, Line numbers ✓, Notebook lines ✓, Theme ▸ (Classic Cream / Dark Mode / Terminal Green), Font size, Larger font, Smaller font, Options… |
+| **View** | Sound effects ✓, Line numbers ✓, Notebook lines ✓, Paper effects ✓, Theme ▸ (Classic Cream / Dark Mode / Terminal Green), Font size, Larger font, Smaller font, Options… |
 | **Help** | Keyboard Shortcuts…, version |
 
 Checkmarks track the live settings and every row shows its keyboard shortcut. The integration is the single-header `hoswl.h` client vendored from Hisashi (`sdk/hoswl`): no threads, nothing ever blocks on the pipe, and if Hisashi is not running Typewriter simply retries every couple of seconds. The setting is persisted as `hisashi_menubar=` in `typewriter.ini`.
+
+## Paper effects
+
+Turn on **Paper effects** in the Options menu (`Ctrl+K`) and the page picks up a few marks: two coffee rings, four ink spills with their droplets, and three creases. They are generated pixel by pixel into a single texture that is laid over the paper *under* the text, so nothing you write ever competes with a stain for legibility.
+
+Each theme carries its own colours for the three kinds of mark, since a brown ring would be invisible on Terminal Green. The seed is fixed, so this is the same sheet of paper every time you open the program rather than a fresh mess on each launch, and the texture is rebuilt only when the window is resized or the theme changes — never per frame. The setting is persisted as `paper_effects=` in `typewriter.ini`.
 
 ## Fonts
 
