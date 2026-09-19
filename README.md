@@ -11,6 +11,8 @@ Built in C with SDL2 — fast, lightweight, cross-platform. Every keystroke clic
 - **Real typewriter sounds** — recorded mechanical key strikes, embedded directly in the binary. Supports concurrent/overlapping playback for a true tactile feel.
 - **Paper aesthetic** — Multiple themes including Classic Cream, Dark Mode, and Terminal Green.
 - **Paper effects** — optional coffee rings, ink spills and creases on the page, drawn procedurally and coloured to suit the theme. Off by default; switch it on in the Options menu.
+- **Struck type** — every character sits a hair off the line and carries its own amount of ink, the way a real typeface strikes a page. On by default.
+- **Carriage backspace** — optional typewriter behaviour: backspace runs the carriage back without lifting the ink, and the next key strikes on top of what is already there. Off by default.
 - **Lightweight** — single C file, near-zero CPU at idle.
 - **Cross-platform** — Windows, macOS, Linux.
 - **Self-contained** — one executable, nothing to install: sounds, icon and the typewriter font are embedded, and SDL2 is linked in statically.
@@ -124,7 +126,7 @@ Options:
 - **Left/Right / Space / Enter**: Cycle themes, change the font size, or toggle options
 - **Esc**: Close menu
 
-Rows: Sound effects · Line numbers · Notebook lines · Theme · Font size · Paper effects · Hisashi menubar (Windows only).
+Rows: Sound effects · Line numbers · Notebook lines · Theme · Font size · Paper effects · Strike variation · Carriage backspace · Hisashi menubar (Windows only).
 
 ### Find & Replace (`Ctrl+F`)
 - **Tab**: Switch between Find and Replace fields
@@ -145,7 +147,7 @@ Rows: Sound effects · Line numbers · Notebook lines · Theme · Font size · P
 |------|-------|
 | **File** | Open…, Save, Quit |
 | **Edit** | Undo, Cut, Copy, Paste, Select All, Find & Replace… |
-| **View** | Sound effects ✓, Line numbers ✓, Notebook lines ✓, Paper effects ✓, Theme ▸ (Classic Cream / Dark Mode / Terminal Green), Font size, Larger font, Smaller font, Options… |
+| **View** | Sound effects ✓, Line numbers ✓, Notebook lines ✓, Paper effects ✓, Strike variation ✓, Carriage backspace ✓, Theme ▸ (Classic Cream / Dark Mode / Terminal Green), Font size, Larger font, Smaller font, Options… |
 | **Help** | Keyboard Shortcuts…, version |
 
 Checkmarks track the live settings and every row shows its keyboard shortcut. The integration is the single-header `hoswl.h` client vendored from Hisashi (`sdk/hoswl`): no threads, nothing ever blocks on the pipe, and if Hisashi is not running Typewriter simply retries every couple of seconds. The setting is persisted as `hisashi_menubar=` in `typewriter.ini`.
@@ -155,6 +157,48 @@ Checkmarks track the live settings and every row shows its keyboard shortcut. Th
 Turn on **Paper effects** in the Options menu (`Ctrl+K`) and the page picks up a few marks: two coffee rings, four ink spills with their droplets, and three creases. They are generated pixel by pixel into a single texture that is laid over the paper *under* the text, so nothing you write ever competes with a stain for legibility.
 
 Each theme carries its own colours for the three kinds of mark, since a brown ring would be invisible on Terminal Green. The seed is fixed, so this is the same sheet of paper every time you open the program rather than a fresh mess on each launch, and the texture is rebuilt only when the window is resized or the theme changes — never per frame. The setting is persisted as `paper_effects=` in `typewriter.ini`.
+
+## Struck type
+
+Body text is drawn a glyph at a time. Each cell sits up to a pixel off the
+baseline, drifts a little left or right, and carries its own amount of ink, so
+no two `e`s on the page are quite the same impression — and about one character
+in twenty-five comes out light, the way a key does when the ribbon is tired.
+
+The variation is derived from the line and column, not from a running random
+number, so a given cell always strikes the same way: the page does not shimmer
+between redraws and scrolling never reshuffles the ink.
+
+This replaced a whole-line `TTF_Render` that built a fresh surface and texture
+for every visible line on every frame. Glyphs now come from a cache of one
+texture per printable ASCII character, tinted and faded at blit time, so the
+effect costs nothing — a redraw allocates nothing at all, and changing theme is
+free. Turn it off with **Strike variation** in the Options menu (`Ctrl+K`) and
+text renders dead straight at full ink. Persisted as `strike_variation=`.
+
+## Carriage backspace
+
+Turn on **Carriage backspace** in the Options menu (`Ctrl+K`) and backspace
+stops erasing. Instead it does what the key does on a typewriter: runs the
+carriage back over the ink without lifting any of it, and stops dead at the
+left margin — ringing the bell rather than reaching up to the line above.
+
+Because a typewriter has no insert, the mode also makes typing overstrike: a
+key struck over an occupied column lands on top of what is already there. The
+character that was there stays visible underneath, drawn faintly and off by a
+pixel, so `cat` backspaced over and typed `xxx` reads as three double
+impressions rather than as clean replacement. That is how you cross a word out
+on a real machine.
+
+The ghosts are cosmetic and one strike deep. They are never written to the
+file, copied to the clipboard or matched by Find — the buffer holds exactly the
+characters you last struck — and any edit that rearranges a line structurally,
+such as splitting it or deleting a selection, simply drops them.
+
+The escape hatch is always there: **Delete** still erases forward, selecting
+text and typing still replaces it, and `Ctrl+Z` still undoes an overstrike and
+puts the original character back. The status bar shows `OVR` while the mode is
+on. Persisted as `carriage_backspace=`.
 
 ## Fonts
 

@@ -5,7 +5,7 @@
  * Build: make  (or)  gcc -O2 main.c -o typewriter $(pkg-config --cflags --libs sdl2 SDL2_ttf) -lm
  */
 
-#define TYPEWRITER_VERSION "0.4.0"
+#define TYPEWRITER_VERSION "0.5.0"
 
 #include <SDL.h>
 #include <SDL_ttf.h>
@@ -94,6 +94,10 @@ typedef struct {
     char *text;
     int   len;
     int   cap;
+    /* Overstrike ghosts: over[i] is the character struck at column i before
+     * the one now there, or 0. Render-only — never saved, copied or searched. */
+    char *over;
+    int   over_cap;
 } Line;
 
 typedef struct {
@@ -118,6 +122,7 @@ typedef enum {
     UNDO_DELETE_LINE,
     UNDO_JOIN_LINES,
     UNDO_SPLIT_LINE,
+    UNDO_OVERSTRIKE,
 } UndoType;
 
 typedef struct {
@@ -157,13 +162,15 @@ typedef struct {
     int theme_idx;
     int font_size;
     int paper_effects;      /* coffee rings, ink spills and creases */
+    int strike_variation;   /* per-character ink density and jitter */
+    int carriage_backspace; /* backspace moves the carriage; typing overstrikes */
     int hisashi_menubar;    /* Windows: publish menus to Hisashi's menubar */
 } Options;
 
 #ifdef _WIN32
-#define MENU_ITEM_COUNT 7   /* last row: Hisashi menubar (Windows only) */
+#define MENU_ITEM_COUNT 9   /* last row: Hisashi menubar (Windows only) */
 #else
-#define MENU_ITEM_COUNT 6
+#define MENU_ITEM_COUNT 8
 #endif
 
 static const char *menu_labels[MENU_ITEM_COUNT] = {
@@ -173,6 +180,8 @@ static const char *menu_labels[MENU_ITEM_COUNT] = {
     "Theme",
     "Font size",
     "Paper effects",
+    "Strike variation",
+    "Carriage backspace",
 #ifdef _WIN32
     "Hisashi menubar",
 #endif
@@ -191,7 +200,9 @@ static int           g_ui_char_h;
 static int           g_running = 1;
 static int           g_need_redraw = 1;
 static Doc           g_doc;
-static Options       g_opts = { 1, 1, 0, 0, 18, 0, 0 }; /* sound=on, lnums=on, lines=off, theme=cream, font=18, paper=off, hisashi=off */
+static Options       g_opts = { 1, 1, 0, 0, 18, 0, 1, 0, 0 };
+/* sound=on, lnums=on, lines=off, theme=cream, font=18, paper=off, strike=on,
+ * carriage=off, hisashi=off */
 static int           g_menu_open = 0;
 static int           g_menu_sel  = 0;
 static int           g_quit_dialog = 0; /* save-before-quit dialog */
@@ -208,6 +219,9 @@ static int           g_find_focus = 0; /* 0 = Find input, 1 = Replace input */
 static void doc_grow(Doc *d);
 static void doc_init(Doc *d);
 static void doc_free(Doc *d);
+static void line_delete_char(Line *ln, int pos);
+static void line_ghost_drop(Line *ln);
+static void line_ghost_ensure(Line *ln);
 static void doc_insert_char(Doc *d, char c);
 static void doc_delete_back(Doc *d);
 static void doc_delete_forward(Doc *d);
@@ -394,10 +408,7 @@ static void undo_pop(Doc *d) {
     case UNDO_INSERT_CHAR: {
         /* An insert was done, so we delete it */
         Line *ln = &d->lines[e->line];
-        if (e->col < ln->len) {
-            memmove(&ln->text[e->col], &ln->text[e->col + 1], ln->len - e->col - 1);
-            ln->len--;
-        }
+        line_delete_char(ln, e->col);
         d->cy = e->line; d->cx = e->col;
     } break;
     case UNDO_DELETE_CHAR: {
@@ -410,7 +421,18 @@ static void undo_pop(Doc *d) {
         memmove(&ln->text[e->col + 1], &ln->text[e->col], ln->len - e->col);
         ln->text[e->col] = e->ch;
         ln->len++;
+        line_ghost_drop(ln);
         d->cy = e->line; d->cx = e->col + 1;
+    } break;
+    case UNDO_OVERSTRIKE: {
+        /* A key was struck over another: put the original back on the page and
+         * lift the ghost it had pushed underneath. */
+        Line *ln = &d->lines[e->line];
+        if (e->col < ln->len) {
+            ln->text[e->col] = e->ch;
+            if (ln->over && e->col < ln->over_cap) ln->over[e->col] = 0;
+        }
+        d->cy = e->line; d->cx = e->col;
     } break;
     case UNDO_SPLIT_LINE: {
         /* A newline was inserted, join lines back */
@@ -422,7 +444,9 @@ static void undo_pop(Doc *d) {
             memcpy(&cur->text[cur->len], next->text, next->len);
             int old_len = cur->len;
             cur->len += next->len;
+            line_ghost_drop(cur);
             free(next->text);
+            free(next->over);
             memmove(&d->lines[e->line + 1], &d->lines[e->line + 2],
                     (d->count - e->line - 2) * sizeof(Line));
             d->count--;
@@ -443,15 +467,19 @@ static void undo_pop(Doc *d) {
         int tail = ln->len - split_at;
         newln->cap = tail > 16 ? tail * 2 : 16;
         newln->text = (char *)xmalloc(newln->cap);
+        newln->over = NULL;
+        newln->over_cap = 0;
         memcpy(newln->text, &ln->text[split_at], tail);
         newln->len = tail;
         ln->len = split_at;
+        line_ghost_drop(ln);
         d->cy = e->line + 1; d->cx = 0;
     } break;
     case UNDO_INSERT_LINE:
         /* A line was inserted, remove it */
         if (e->line < d->count) {
             free(d->lines[e->line].text);
+            free(d->lines[e->line].over);
             memmove(&d->lines[e->line], &d->lines[e->line + 1],
                     (d->count - e->line - 1) * sizeof(Line));
             d->count--;
@@ -469,6 +497,8 @@ static void undo_pop(Doc *d) {
         d->lines[e->line].len = e->text ? (int)strlen(e->text) : 0;
         d->lines[e->line].cap = d->lines[e->line].len + 16;
         d->lines[e->line].text = (char *)xmalloc(d->lines[e->line].cap);
+        d->lines[e->line].over = NULL;
+        d->lines[e->line].over_cap = 0;
         if (e->text) memcpy(d->lines[e->line].text, e->text, d->lines[e->line].len);
         d->cy = e->line; d->cx = 0;
         break;
@@ -484,6 +514,34 @@ static void line_init(Line *ln) {
     ln->cap  = 64;
     ln->len  = 0;
     ln->text = (char *)xmalloc(ln->cap);
+    ln->over = NULL;
+    ln->over_cap = 0;
+}
+
+/* ── Overstrike ghosts ──────────────────────────────────────────────
+ * With carriage backspace on, a key struck over an occupied column keeps the
+ * character that was already there as a ghost, which the renderer draws under
+ * the new one and slightly off — the way a second strike lands on a platen.
+ * The layer is cosmetic and one strike deep, so any edit that rearranges a
+ * line structurally just drops it rather than trying to follow along.
+ */
+static void line_ghost_drop(Line *ln) {
+    free(ln->over);
+    ln->over = NULL;
+    ln->over_cap = 0;
+}
+
+/* Give the line a ghost slot for every column it can currently hold. */
+static void line_ghost_ensure(Line *ln) {
+    if (ln->over && ln->over_cap >= ln->cap) return;
+    char *n = (char *)xmalloc(ln->cap);
+    memset(n, 0, ln->cap);
+    if (ln->over) {
+        memcpy(n, ln->over, min_i(ln->over_cap, ln->cap));
+        free(ln->over);
+    }
+    ln->over = n;
+    ln->over_cap = ln->cap;
 }
 
 static void doc_init(Doc *d) {
@@ -495,7 +553,10 @@ static void doc_init(Doc *d) {
 }
 
 static void doc_free(Doc *d) {
-    for (int i = 0; i < d->count; i++) free(d->lines[i].text);
+    for (int i = 0; i < d->count; i++) {
+        free(d->lines[i].text);
+        free(d->lines[i].over);
+    }
     free(d->lines);
 }
 
@@ -519,16 +580,45 @@ static void line_insert_char(Line *ln, int pos, char c) {
     if (ln->len + 1 >= ln->cap) {
         ln->cap *= 2;
         ln->text = (char *)xrealloc(ln->text, ln->cap);
+        if (ln->over) line_ghost_ensure(ln);
     }
     memmove(&ln->text[pos + 1], &ln->text[pos], ln->len - pos);
     ln->text[pos] = c;
+    if (ln->over) {
+        memmove(&ln->over[pos + 1], &ln->over[pos], ln->len - pos);
+        ln->over[pos] = 0;
+    }
     ln->len++;
+}
+
+/* Remove the character at pos, taking its ghost with it. */
+static void line_delete_char(Line *ln, int pos) {
+    if (pos < 0 || pos >= ln->len) return;
+    memmove(&ln->text[pos], &ln->text[pos + 1], ln->len - pos - 1);
+    if (ln->over)
+        memmove(&ln->over[pos], &ln->over[pos + 1], ln->len - pos - 1);
+    ln->len--;
 }
 
 static void doc_insert_char(Doc *d, char c) {
     doc_ensure_line(d, d->cy);
     Line *ln = &d->lines[d->cy];
     int pos = clamp(d->cx, 0, ln->len);
+
+    /* A typewriter has no insert. With the carriage mode on, a key struck over
+     * an occupied column lands on top of what is already there. */
+    if (g_opts.carriage_backspace && pos < ln->len) {
+        char was = ln->text[pos];
+        undo_push(UNDO_OVERSTRIKE, d->cy, pos, was, NULL);
+        line_ghost_ensure(ln);
+        if (ln->over[pos] == 0) ln->over[pos] = was;
+        ln->text[pos] = c;
+        d->cx = pos + 1;
+        d->dirty = 1;
+        if (d->cx == BELL_COLUMN) play_sound(&snd_bell);
+        return;
+    }
+
     undo_push(UNDO_INSERT_CHAR, d->cy, pos, c, NULL);
     line_insert_char(ln, pos, c);
     d->cx = pos + 1;
@@ -540,14 +630,25 @@ static void doc_insert_char(Doc *d, char c) {
 }
 
 static void doc_delete_back(Doc *d) {
+    /* Carriage backspace: the carriage runs back over the ink without lifting
+     * it, and stops dead at the left margin — a typewriter cannot reach up to
+     * the line above. Nothing is erased, so nothing is pushed onto the undo
+     * stack and the document does not become dirty. */
+    if (g_opts.carriage_backspace) {
+        doc_ensure_line(d, d->cy);
+        d->cx = clamp(d->cx, 0, d->lines[d->cy].len);
+        if (d->cx > 0) d->cx--;
+        else           play_sound(&snd_bell);
+        return;
+    }
+
     if (d->cx > 0) {
         Line *ln = &d->lines[d->cy];
         d->cx = clamp(d->cx, 0, ln->len);
         if (d->cx > 0) {
             d->cx--;
             undo_push(UNDO_DELETE_CHAR, d->cy, d->cx, ln->text[d->cx], NULL);
-            memmove(&ln->text[d->cx], &ln->text[d->cx + 1], ln->len - d->cx - 1);
-            ln->len--;
+            line_delete_char(ln, d->cx);
             d->dirty = 1;
         }
     } else if (d->cy > 0) {
@@ -562,7 +663,9 @@ static void doc_delete_back(Doc *d) {
         }
         memcpy(&prev->text[prev->len], cur->text, cur->len);
         prev->len += cur->len;
+        line_ghost_drop(prev);
         free(cur->text);
+        free(cur->over);
         memmove(&d->lines[d->cy], &d->lines[d->cy + 1],
                 (d->count - d->cy - 1) * sizeof(Line));
         d->count--;
@@ -576,8 +679,7 @@ static void doc_delete_forward(Doc *d) {
     Line *ln = &d->lines[d->cy];
     if (d->cx < ln->len) {
         undo_push(UNDO_DELETE_CHAR, d->cy, d->cx, ln->text[d->cx], NULL);
-        memmove(&ln->text[d->cx], &ln->text[d->cx + 1], ln->len - d->cx - 1);
-        ln->len--;
+        line_delete_char(ln, d->cx);
         d->dirty = 1;
     } else if (d->cy + 1 < d->count) {
         /* Join with next line */
@@ -589,7 +691,9 @@ static void doc_delete_forward(Doc *d) {
         }
         memcpy(&ln->text[ln->len], next->text, next->len);
         ln->len += next->len;
+        line_ghost_drop(ln);
         free(next->text);
+        free(next->over);
         memmove(&d->lines[d->cy + 1], &d->lines[d->cy + 2],
                 (d->count - d->cy - 2) * sizeof(Line));
         d->count--;
@@ -617,9 +721,12 @@ static void doc_insert_newline(Doc *d) {
     int tail = ln->len - d->cx;
     newln->cap = tail > 16 ? tail * 2 : 16;
     newln->text = (char *)xmalloc(newln->cap);
+    newln->over = NULL;
+    newln->over_cap = 0;
     memcpy(newln->text, &ln->text[d->cx], tail);
     newln->len = tail;
     ln->len = d->cx;
+    line_ghost_drop(ln);
 
     d->cy++;
     d->cx = 0;
@@ -658,7 +765,10 @@ static int doc_load(Doc *d, const char *path) {
     if (!f) return -1;
 
     /* Clear existing doc */
-    for (int i = 0; i < d->count; i++) free(d->lines[i].text);
+    for (int i = 0; i < d->count; i++) {
+        free(d->lines[i].text);
+        free(d->lines[i].over);
+    }
     d->count = 0;
     d->cx = d->cy = d->scroll_y = 0;
     d->dirty = 0;
@@ -738,6 +848,7 @@ static void sel_delete(Doc *d) {
         Line *ln = &d->lines[r1];
         memmove(&ln->text[c1], &ln->text[c2], ln->len - c2);
         ln->len -= (c2 - c1);
+        line_ghost_drop(ln);
     } else {
         /* Keep start of first line + end of last line */
         Line *first = &d->lines[r1];
@@ -749,8 +860,12 @@ static void sel_delete(Doc *d) {
         }
         memcpy(&first->text[c1], &last->text[c2], tail);
         first->len = c1 + tail;
+        line_ghost_drop(first);
         /* Remove intermediate lines */
-        for (int i = r1 + 1; i <= r2; i++) free(d->lines[i].text);
+        for (int i = r1 + 1; i <= r2; i++) {
+            free(d->lines[i].text);
+            free(d->lines[i].over);
+        }
         int removed = r2 - r1;
         memmove(&d->lines[r1 + 1], &d->lines[r2 + 1],
                 (d->count - r2 - 1) * sizeof(Line));
@@ -808,7 +923,7 @@ static const char *font_candidates[] = {
     NULL
 };
 
-static TTF_Font *load_font(int size) {
+static TTF_Font *load_font_file(int size) {
     /* First try bundled font next to executable */
     char exe_path[MAX_PATH_LEN];
     /* Try "typewriter.ttf" next to the binary */
@@ -844,6 +959,16 @@ static TTF_Font *load_font(int size) {
     return NULL;
 }
 
+/* Kerning off keeps the per-glyph strike renderer and TTF_SizeUTF8 - which is
+ * what places the cursor and the selection highlight - in exact agreement:
+ * with no kerning a run's width is the sum of its glyphs' widths, so the two
+ * cannot drift apart. Special Elite barely kerns, so nothing looks different. */
+static TTF_Font *load_font(int size) {
+    TTF_Font *f = load_font_file(size);
+    if (f) TTF_SetFontKerning(f, 0);
+    return f;
+}
+
 /* ── Rendering ─────────────────────────────────────────────────── */
 
 static void render_text(TTF_Font *font, const char *text, int len, int x, int y,
@@ -864,6 +989,131 @@ static void render_text(TTF_Font *font, const char *text, int len, int x, int y,
     SDL_FreeSurface(surf);
 }
 
+/* -- Struck type --------------------------------------------------
+ * Body text is drawn a glyph at a time out of a cache of white textures, one
+ * per printable ASCII character, tinted and faded at blit time. That buys two
+ * things: a real typewriter's uneven strike - every cell sits a hair off the
+ * line and carries its own amount of ink - and, because the cache is built
+ * once per font size, a redraw that allocates nothing at all. The whole-line
+ * TTF_Render this replaced built a fresh surface and texture for every
+ * visible line, every frame.
+ */
+
+#define GLYPH_FIRST 32
+#define GLYPH_LAST  126
+#define GLYPH_COUNT (GLYPH_LAST - GLYPH_FIRST + 1)
+
+static SDL_Texture *g_glyph_tex[GLYPH_COUNT];
+static int          g_glyph_w[GLYPH_COUNT];
+static int          g_glyph_h[GLYPH_COUNT];
+static int          g_glyph_adv[GLYPH_COUNT];
+static int          g_glyph_size = -1;    /* font size the cache was built at */
+
+static void glyph_cache_free(void) {
+    for (int i = 0; i < GLYPH_COUNT; i++) {
+        if (g_glyph_tex[i]) SDL_DestroyTexture(g_glyph_tex[i]);
+        g_glyph_tex[i] = NULL;
+        g_glyph_w[i] = g_glyph_h[i] = g_glyph_adv[i] = 0;
+    }
+    g_glyph_size = -1;
+}
+
+static void glyph_cache_build(void) {
+    glyph_cache_free();
+    if (!g_font || !g_ren) return;
+
+    SDL_Color white = { 255, 255, 255, 255 };
+    for (int i = 0; i < GLYPH_COUNT; i++) {
+        char one[2] = { (char)(GLYPH_FIRST + i), 0 };
+
+        /* The advance comes from TTF_SizeUTF8 on the same one-character string
+         * the texture is rendered from, which is exactly what
+         * text_segment_width sums when it places the cursor. */
+        int w = 0;
+        if (TTF_SizeUTF8(g_font, one, &w, NULL) != 0 || w <= 0) w = g_char_w;
+        g_glyph_adv[i] = w;
+
+        SDL_Surface *surf = TTF_RenderUTF8_Blended(g_font, one, white);
+        if (!surf) continue;
+        g_glyph_tex[i] = SDL_CreateTextureFromSurface(g_ren, surf);
+        g_glyph_w[i]   = surf->w;
+        g_glyph_h[i]   = surf->h;
+        if (g_glyph_tex[i])
+            SDL_SetTextureBlendMode(g_glyph_tex[i], SDL_BLENDMODE_BLEND);
+        SDL_FreeSurface(surf);
+    }
+    g_glyph_size = g_opts.font_size;
+}
+
+/* The same column of the same line always strikes the same way, so the page
+ * never shimmers between redraws and scrolling does not reshuffle the ink. */
+static unsigned strike_hash(int line, int col, unsigned char ch) {
+    unsigned h = 2166136261u;
+    h = (h ^ (unsigned)line) * 16777619u;
+    h = (h ^ (unsigned)col)  * 16777619u;
+    h = (h ^ (unsigned)ch)   * 16777619u;
+    return h ^ (h >> 15);
+}
+
+static int run_is_cacheable(const char *t, int len) {
+    for (int i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)t[i];
+        if (c < GLYPH_FIRST || c > GLYPH_LAST) return 0;
+    }
+    return 1;
+}
+
+/* Draw one cached glyph, tinted to the theme and faded to its ink density. */
+static void glyph_blit(int gi, int x, int y, SDL_Color col, int alpha) {
+    if (gi < 0 || gi >= GLYPH_COUNT || !g_glyph_tex[gi]) return;
+    if (alpha <= 0) return;
+    if (alpha > 255) alpha = 255;
+    SDL_SetTextureColorMod(g_glyph_tex[gi], col.r, col.g, col.b);
+    SDL_SetTextureAlphaMod(g_glyph_tex[gi], (Uint8)alpha);
+    SDL_Rect dst = { x, y, g_glyph_w[gi], g_glyph_h[gi] };
+    SDL_RenderCopy(g_ren, g_glyph_tex[gi], NULL, &dst);
+}
+
+/* `over` may be NULL; when present it is the ghost row for the same columns.
+ * `vary` off draws the run dead straight at full ink, which is what the
+ * Strike variation toggle turns off - ghosts still show either way. */
+static void render_strike_run(const char *text, const char *over, int len,
+                              int x, int y, SDL_Color col,
+                              int line_idx, int first_col, int vary) {
+    int base_a = col.a ? col.a : 255;
+
+    for (int i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)text[i];
+        int gi = (int)c - GLYPH_FIRST;
+
+        int jx = 0, jy = 0, alpha = base_a;
+        if (vary) {
+            unsigned h = strike_hash(line_idx, first_col + i, c);
+            jy = (int)((h >> 3) % 3) - 1;                     /* -1..+1 px   */
+            jx = ((h >> 7) % 4 == 0) ? (((h >> 9) & 1) ? 1 : -1) : 0;
+            int ink = 205 + (int)((h >> 11) % 51);            /* 205..255    */
+            if ((h >> 17) % 25 == 0)                          /* weak strike */
+                ink = 150 + (int)((h >> 19) % 30);
+            alpha = ink * base_a / 255;
+        }
+
+        /* The ghost of an earlier strike sits under the new one and off by a
+         * pixel, so it reads as a second impression rather than as blur. */
+        if (over && over[i]) {
+            unsigned char gc = (unsigned char)over[i];
+            if (gc >= GLYPH_FIRST && gc <= GLYPH_LAST) {
+                unsigned gh = strike_hash(line_idx, first_col + i, gc);
+                int gx = x + 1 + (vary ? (int)((gh >> 5) % 2) : 0);
+                int gy = y + 1 + (vary ? (int)((gh >> 13) % 2) : 0);
+                glyph_blit((int)gc - GLYPH_FIRST, gx, gy, col, alpha * 45 / 100);
+            }
+        }
+
+        glyph_blit(gi, x + jx, y + jy, col, alpha);
+        x += g_glyph_adv[gi];
+    }
+}
+
 static int *menu_opt_ptr(int idx) {
     switch (idx) {
     case 0: return &g_opts.sound_enabled;
@@ -871,7 +1121,9 @@ static int *menu_opt_ptr(int idx) {
     case 2: return &g_opts.show_notebook_lines;
     case 3: return &g_opts.theme_idx;
     case 5: return &g_opts.paper_effects;
-    case 6: return &g_opts.hisashi_menubar;
+    case 6: return &g_opts.strike_variation;
+    case 7: return &g_opts.carriage_backspace;
+    case 8: return &g_opts.hisashi_menubar;
     default: return NULL;
     }
 }
@@ -1254,6 +1506,8 @@ static void render(Doc *d) {
     int ww, wh;
     SDL_GetWindowSize(g_win, &ww, &wh);
 
+    if (g_glyph_size != g_opts.font_size) glyph_cache_build();
+
     int t_idx = clamp(g_opts.theme_idx, 0, THEME_COUNT - 1);
     const Theme *t = &g_themes[t_idx];
 
@@ -1334,8 +1588,19 @@ static void render(Doc *d) {
             int max_vis_chars = (ww - text_x) / 4 + 40;
             if (len > max_vis_chars) len = max_vis_chars;
             
-            if (len > 0)
-                render_text(g_font, &ln->text[start_col], len, text_x, y, t->text);
+            if (len > 0) {
+                /* The cached path also carries the ghosts, so it is used
+                 * whenever a line has any, even with variation switched off. */
+                if ((g_opts.strike_variation || ln->over)
+                    && g_glyph_size == g_opts.font_size
+                    && run_is_cacheable(&ln->text[start_col], len))
+                    render_strike_run(&ln->text[start_col],
+                                      ln->over ? &ln->over[start_col] : NULL,
+                                      len, text_x, y, t->text,
+                                      li, start_col, g_opts.strike_variation);
+                else
+                    render_text(g_font, &ln->text[start_col], len, text_x, y, t->text);
+            }
         }
     }
 
@@ -1378,8 +1643,9 @@ static void render(Doc *d) {
     const char *fname = d->filepath[0] ? d->filepath : "[untitled]";
     /* Truncate displayed filename to fit status bar */
     snprintf(fname_short, sizeof(fname_short), "%.120s", fname);
-    snprintf(status, sizeof(status), " %s%s  |  Ln %d, Col %d  |  %d lines  |  Ctrl+K options",
-             fname_short, d->dirty ? " *" : "", d->cy + 1, d->cx + 1, d->count);
+    snprintf(status, sizeof(status), " %s%s  |  Ln %d, Col %d  |  %d lines%s  |  Ctrl+K options",
+             fname_short, d->dirty ? " *" : "", d->cy + 1, d->cx + 1, d->count,
+             g_opts.carriage_backspace ? "  |  OVR" : "");
     render_text(g_ui_font, status, (int)strlen(status), 8, wh - 24, t->status_fg);
 
     /* ── Options menu overlay ── */
@@ -1745,6 +2011,8 @@ static void settings_save(void) {
     fprintf(f, "theme_idx=%d\n", g_opts.theme_idx);
     fprintf(f, "font_size=%d\n", g_opts.font_size);
     fprintf(f, "paper_effects=%d\n", g_opts.paper_effects);
+    fprintf(f, "strike_variation=%d\n", g_opts.strike_variation);
+    fprintf(f, "carriage_backspace=%d\n", g_opts.carriage_backspace);
     fprintf(f, "hisashi_menubar=%d\n", g_opts.hisashi_menubar);
     fclose(f);
 }
@@ -1757,6 +2025,8 @@ static void settings_load(void) {
     g_opts.theme_idx = 0;
     g_opts.font_size = 18;
     g_opts.paper_effects = 0;
+    g_opts.strike_variation = 1;
+    g_opts.carriage_backspace = 0;
     g_opts.hisashi_menubar = 0;
 
     char path[MAX_PATH_LEN];
@@ -1777,6 +2047,8 @@ static void settings_load(void) {
         else if (sscanf(line, "show_line_numbers=%d", &val) == 1) g_opts.show_line_numbers = val;
         else if (sscanf(line, "show_notebook_lines=%d", &val) == 1) g_opts.show_notebook_lines = val;
         else if (sscanf(line, "paper_effects=%d", &val) == 1) g_opts.paper_effects = val != 0;
+        else if (sscanf(line, "strike_variation=%d", &val) == 1) g_opts.strike_variation = val != 0;
+        else if (sscanf(line, "carriage_backspace=%d", &val) == 1) g_opts.carriage_backspace = val != 0;
         else if (sscanf(line, "hisashi_menubar=%d", &val) == 1) g_opts.hisashi_menubar = val != 0;
         else if (sscanf(line, "theme_idx=%d", &val) == 1) {
             g_opts.theme_idx = val;
@@ -1815,6 +2087,7 @@ static void reload_font(void) {
     if (g_font) {
         TTF_SizeText(g_font, "M", &g_char_w, &g_char_h);
     }
+    glyph_cache_free();   /* rebuilt lazily at the next redraw, at the new size */
 }
 
 /* Option changes shared by the Options panel and the Hisashi menubar. */
@@ -2136,7 +2409,8 @@ static int hisashi_active(void) {
 static unsigned hisashi_fingerprint(void) {
     int vals[] = { g_opts.sound_enabled, g_opts.show_line_numbers,
                    g_opts.show_notebook_lines, g_opts.theme_idx, g_opts.font_size,
-                   g_opts.paper_effects };
+                   g_opts.paper_effects, g_opts.strike_variation,
+                   g_opts.carriage_backspace };
     unsigned h = 2166136261u;
     for (size_t i = 0; i < sizeof(vals) / sizeof(vals[0]); i++)
         h = (h ^ (unsigned)(vals[i] + 1)) * 16777619u;
@@ -2172,12 +2446,16 @@ static void hisashi_publish(void) {
         " view.lnums|Line numbers||%s\n"
         " view.notebook|Notebook lines||%s\n"
         " view.paper|Paper effects||%s\n"
+        " view.strike|Strike variation||%s\n"
+        " view.carriage|Carriage backspace||%s\n"
         " -\n"
         " view.theme|Theme|>\n",
         g_opts.sound_enabled ? "x" : "c",
         g_opts.show_line_numbers ? "x" : "c",
         g_opts.show_notebook_lines ? "x" : "c",
-        g_opts.paper_effects ? "x" : "c");
+        g_opts.paper_effects ? "x" : "c",
+        g_opts.strike_variation ? "x" : "c",
+        g_opts.carriage_backspace ? "x" : "c");
     for (int i = 0; i < THEME_COUNT; i++)
         PUT("  view.theme.%d|%s||%s\n", i, theme_names[i], g_opts.theme_idx == i ? "x" : "c");
     PUT(" -\n"
@@ -2205,6 +2483,8 @@ static void hisashi_dispatch(const char *id, Doc *d) {
     if (strcmp(id, "view.lnums") == 0)        { option_toggle(1); return; }
     if (strcmp(id, "view.notebook") == 0)     { option_toggle(2); return; }
     if (strcmp(id, "view.paper") == 0)        { option_toggle(5); return; }
+    if (strcmp(id, "view.strike") == 0)       { option_toggle(6); return; }
+    if (strcmp(id, "view.carriage") == 0)     { option_toggle(7); return; }
     if (sscanf(id, "view.theme.%d", &i) == 1) { if (i >= 0 && i < THEME_COUNT) option_set_theme(i); return; }
     if (strcmp(id, "view.font.larger") == 0)  { option_font_size_delta(+1); return; }
     if (strcmp(id, "view.font.smaller") == 0) { option_font_size_delta(-1); return; }
@@ -2630,6 +2910,7 @@ int main(int argc, char *argv[]) {
     paper_effects_free();
     doc_free(&g_doc);
     sound_cleanup();
+    glyph_cache_free();
     if (g_font) TTF_CloseFont(g_font);
     if (g_ui_font && g_ui_font != g_font) TTF_CloseFont(g_ui_font);
     SDL_DestroyRenderer(g_ren);
