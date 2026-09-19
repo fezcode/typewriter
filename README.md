@@ -168,3 +168,10 @@ Both take precedence over the embedded font. To change the embedded font itself,
 ## License
 
 MIT
+
+## Application icon
+
+The editable icon design lives in `tools/make-icon.py`. Run
+`python tools/make-icon.py` with Python, Pillow and a C compiler (`gcc`, or set
+`CC`) to regenerate the SVG, PNG and multi-resolution Windows ICO assets.
+The same generated C renderer supplies the runtime window icon, with no external image dependency.

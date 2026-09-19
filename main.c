@@ -20,6 +20,7 @@
 #include "snd_backspace.h"
 #include "snd_bell.h"
 #include "font_embed.h"
+#include "icon.h"
 #define HOSWL_IMPLEMENTATION   /* Hisashi menubar client (hoswl.h); no-op off Windows */
 #include "hoswl.h"
 
@@ -2514,21 +2515,15 @@ int main(int argc, char *argv[]) {
         return 1;
     }
 
-    /* Set window icon from icon.png next to the executable */
+    /* Embedded artwork also supplies the window icon on Linux and macOS. */
     {
-        const char *base = SDL_GetBasePath();
-        if (base) {
-            char icon_path[MAX_PATH_LEN];
-            snprintf(icon_path, sizeof(icon_path), "%sicon.png", base);
-            SDL_Surface *icon = SDL_LoadBMP(icon_path); /* try BMP first */
-            if (!icon) {
-                /* SDL_image not available; try loading via SDL_RWops trick:
-                   fall back — the .ico in the resource file handles Windows exe icon */
-            }
-            if (icon) {
-                SDL_SetWindowIcon(g_win, icon);
-                SDL_FreeSurface(icon);
-            }
+        uint8_t pixels[64 * 64 * 4];
+        icon_render_rgba(pixels, 64);
+        SDL_Surface *icon = SDL_CreateRGBSurfaceWithFormatFrom(
+            pixels, 64, 64, 32, 64 * 4, SDL_PIXELFORMAT_RGBA32);
+        if (icon) {
+            SDL_SetWindowIcon(g_win, icon);
+            SDL_FreeSurface(icon);
         }
     }
 
