@@ -7,7 +7,7 @@
 
 [app]
 name    = "Typewriter"
-version = "0.5.0"
+version = "0.5.1"
 id      = "com.fezcode.typewriter"
 icon    = "icon.ico"
 
