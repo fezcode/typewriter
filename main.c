@@ -5,7 +5,7 @@
  * Build: make  (or)  gcc -O2 main.c -o typewriter $(pkg-config --cflags --libs sdl2 SDL2_ttf) -lm
  */
 
-#define TYPEWRITER_VERSION "0.5.1"
+#define TYPEWRITER_VERSION "0.6.0"
 
 #include <SDL.h>
 #include <SDL_ttf.h>
@@ -1997,11 +1997,118 @@ static int file_dialog_save(char *out, int out_size) {
 
 /* ── Options menu helpers ───────────────────────────────────────── */
 
+/* ── Settings location ──────────────────────────────────────────────
+ * Per-user settings live in one Fezcode-owned tree so an uninstall "purge"
+ * can remove them in one place (and Program Files installs still persist):
+ *   Windows  %APPDATA%\fezcode\Typewriter\typewriter.ini
+ *   macOS    ~/Library/Application Support/fezcode/Typewriter/typewriter.ini
+ *   other    $XDG_CONFIG_HOME (or ~/.config)/fezcode/Typewriter/typewriter.ini
+ * Up to 0.5.1 the file sat next to the executable; settings_migrate_legacy()
+ * moves such a file over once. Typewriter writes no logs or caches, so there is
+ * nothing for %LOCALAPPDATA%\fezcode\Typewriter yet. */
+
+#define SETTINGS_APP_DIR  "Typewriter"
+#define SETTINGS_FILE     "typewriter.ini"
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
+
+/* Fills out with the settings folder, creating it (parent first -- Win32 has
+ * no mkdir -p). Returns 0 on success, -1 if no home could be determined. */
+static int settings_dir(char *out, size_t cap) {
+#ifdef _WIN32
+    const char *appdata = getenv("APPDATA");
+    if (!appdata || !*appdata) return -1;
+    char dir[MAX_PATH_LEN];
+    snprintf(dir, sizeof(dir), "%s\\fezcode", appdata);
+    CreateDirectoryA(dir, NULL);
+    snprintf(dir, sizeof(dir), "%s\\fezcode\\" SETTINGS_APP_DIR, appdata);
+    CreateDirectoryA(dir, NULL);
+    snprintf(out, cap, "%s", dir);
+#else
+    char base[MAX_PATH_LEN];
+    const char *home = getenv("HOME");
+  #ifdef __APPLE__
+    if (!home || !*home) return -1;
+    snprintf(base, sizeof(base), "%s/Library/Application Support", home);
+  #else
+    const char *xdg = getenv("XDG_CONFIG_HOME");
+    if (xdg && *xdg)        snprintf(base, sizeof(base), "%s", xdg);
+    else if (home && *home) snprintf(base, sizeof(base), "%s/.config", home);
+    else return -1;
+  #endif
+    char dir[MAX_PATH_LEN];
+    snprintf(dir, sizeof(dir), "%s/fezcode", base);                     mkdir(dir, 0755);
+    snprintf(dir, sizeof(dir), "%s/fezcode/" SETTINGS_APP_DIR, base);   mkdir(dir, 0755);
+    snprintf(out, cap, "%s", dir);
+#endif
+    return 0;
+}
+
+/* Full path of the settings file. Falls back to the old exe-side location
+ * only when no per-user home exists at all. Returns 0 on success. */
+static int settings_path(char *out, size_t cap) {
+    char dir[MAX_PATH_LEN];
+    if (settings_dir(dir, sizeof(dir)) == 0) {
+#ifdef _WIN32
+        snprintf(out, cap, "%s\\" SETTINGS_FILE, dir);
+#else
+        snprintf(out, cap, "%s/" SETTINGS_FILE, dir);
+#endif
+        return 0;
+    }
+    char *base = SDL_GetBasePath();
+    if (!base) return -1;
+    snprintf(out, cap, "%s" SETTINGS_FILE, base);
+    SDL_free(base);
+    return 0;
+}
+
+/* Legacy (<= 0.5.1) location: typewriter.ini next to the executable. */
+static int settings_legacy_path(char *out, size_t cap) {
+    char *base = SDL_GetBasePath();
+    if (!base) return -1;
+    snprintf(out, cap, "%s" SETTINGS_FILE, base);
+    SDL_free(base);
+    return 0;
+}
+
+static int file_exists(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+/* One-time, idempotent migration of the exe-side typewriter.ini. If the new
+ * file already exists it wins and the stale exe-side copy is deleted (best
+ * effort -- a read-only install folder just keeps it). Never fails startup:
+ * if the move is impossible the legacy path is handed back so its values are
+ * still read once and saved to the new location (the leftover is then deleted
+ * on a later launch if possible). Returns 1 and fills read_from in that case. */
+static int settings_migrate_legacy(const char *new_path, char *read_from, size_t cap) {
+    char old_path[MAX_PATH_LEN];
+    if (settings_legacy_path(old_path, sizeof(old_path)) != 0) return 0;
+    if (strcmp(old_path, new_path) == 0) return 0;       /* no per-user home */
+    if (!file_exists(old_path)) return 0;
+    if (file_exists(new_path)) {                         /* new wins */
+        remove(old_path);                                /* failure is fine */
+        return 0;
+    }
+#ifdef _WIN32
+    if (MoveFileExA(old_path, new_path, MOVEFILE_COPY_ALLOWED)) return 0;
+#else
+    if (rename(old_path, new_path) == 0) return 0;
+#endif
+    snprintf(read_from, cap, "%s", old_path);
+    return 1;
+}
+
 static void settings_save(void) {
     char path[MAX_PATH_LEN];
-    const char *base = SDL_GetBasePath();
-    if (!base) return;
-    snprintf(path, sizeof(path), "%stypewriter.ini", base);
+    if (settings_path(path, sizeof(path)) != 0) return;
 
     FILE *f = fopen(path, "w");
     if (!f) return;
@@ -2030,11 +2137,13 @@ static void settings_load(void) {
     g_opts.hisashi_menubar = 0;
 
     char path[MAX_PATH_LEN];
-    const char *base = SDL_GetBasePath();
-    if (!base) return;
-    snprintf(path, sizeof(path), "%stypewriter.ini", base);
+    if (settings_path(path, sizeof(path)) != 0) return;
 
-    FILE *f = fopen(path, "r");
+    /* Move a legacy exe-side typewriter.ini over before reading. */
+    char legacy[MAX_PATH_LEN];
+    int from_legacy = settings_migrate_legacy(path, legacy, sizeof(legacy));
+
+    FILE *f = fopen(from_legacy ? legacy : path, "r");
     if (!f) {
         settings_save();
         return;
@@ -2059,6 +2168,8 @@ static void settings_load(void) {
         }
     }
     fclose(f);
+    /* Couldn't move the legacy file: write its values to the new home now. */
+    if (from_legacy) settings_save();
 }
 
 static void menu_toggle(void);

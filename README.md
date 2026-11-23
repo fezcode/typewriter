@@ -38,7 +38,7 @@ Prebuilt self-contained executables are attached to each [GitHub release](https:
 
 The binaries are not code-signed. On macOS, Gatekeeper may refuse to open a downloaded copy; run `xattr -d com.apple.quarantine typewriter` once to clear the quarantine flag.
 
-Settings are stored in `typewriter.ini` next to the executable, so keep it in a writable folder.
+Settings are stored in `typewriter.ini` under `%APPDATA%\fezcode\Typewriter` (macOS: `~/Library/Application Support/fezcode/Typewriter`, Linux: `~/.config/fezcode/Typewriter`). A `typewriter.ini` left next to the executable by an older version is moved there on first launch.
 
 ## Build
 
@@ -93,7 +93,7 @@ The same steps run in GitHub Actions (`.github/workflows/release.yml`) for every
 The version lives in two places — `TYPEWRITER_VERSION` in `main.c` and `[app] version` in `forge.toml` (the installer scripts read the manifest) — so a release is:
 
 1. Bump `TYPEWRITER_VERSION` in `main.c` and `[app] version` in `forge.toml`; commit.
-2. **Windows installer** — `.\build.ps1 -Installer` builds the static `typewriter.exe` and stamps `dist\Typewriter-Setup-<version>.exe` with [Forge](https://github.com/fezcode/Forge) (`forge.toml`; needs `..\Forge\build\forge.exe`). The installer is per-user (`%LOCALAPPDATA%\Programs\Typewriter`), adds Start Menu / desktop shortcuts, registers in Add/Remove Programs and keeps `typewriter.ini` on uninstall.
+2. **Windows installer** — `.\build.ps1 -Installer` builds the static `typewriter.exe` and stamps `dist\Typewriter-Setup-<version>.exe` with [Forge](https://github.com/fezcode/Forge) (`forge.toml`; needs `..\Forge\build\forge.exe`). The installer is per-user (`%LOCALAPPDATA%\Programs\Typewriter`), adds Start Menu / desktop shortcuts, registers in Add/Remove Programs and keeps your settings on uninstall unless you tick "Also remove my settings and data".
 3. **macOS app** — on a Mac, `./package_macos.sh --dmg` builds the universal binary and assembles `dist/macos-universal/Typewriter.app` plus `dist/Typewriter-<version>.dmg` (ad-hoc signed; pass `--sign "Developer ID Application: …"` and notarize for wider distribution).
 4. Tag and publish: `git tag v<version> && git push --tags`. CI attaches the raw Windows/Linux/macOS binaries to the release; add the installer and the image with `gh release upload v<version> dist/Typewriter-Setup-<version>.exe dist/Typewriter-<version>.dmg`, then write the release notes.
 

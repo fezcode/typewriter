@@ -7,7 +7,7 @@
 
 [app]
 name    = "Typewriter"
-version = "0.5.1"
+version = "0.6.0"
 id      = "com.fezcode.typewriter"
 icon    = "icon.ico"
 
@@ -24,16 +24,15 @@ theme        = "mica"
 window_title = "Typewriter ${app.version} Setup"
 
 [install]
-# Per-user, no UAC. Typewriter keeps its settings in typewriter.ini next to the
-# executable, so the install folder has to be writable by the user -- Program
-# Files would silently stop settings from persisting.
+# Per-user, no UAC. Settings live in %APPDATA%\fezcode\Typewriter rather than
+# the install folder, so the install folder no longer needs to be writable.
 default_dir = "${LOCALAPPDATA}/Programs/Typewriter"
 
 [uninstall]
-keep          = ["typewriter.ini"]
-# typewriter.ini lives in the install folder, so that folder is the "settings dir":
+# typewriter.ini lives in %APPDATA%\fezcode\Typewriter (the Fezcode convention);
 # it is only removed when the user ticks "Also remove my settings and data".
-settings_dirs = ["${INSTALLDIR}"]
+# Typewriter writes no logs or caches, so there is no %LOCALAPPDATA% data dir.
+settings_dirs = ["${APPDATA}/fezcode/Typewriter"]
 
 # --- wizard -----------------------------------------------------------------
 
