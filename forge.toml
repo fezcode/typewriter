@@ -18,9 +18,8 @@ support_url = "https://github.com/fezcode/typewriter/issues"
 comments    = "A distraction-free text editor with the soul of a mechanical typewriter."
 
 [ui]
-# mica = the Windows 11 look (same as Descry and Atelier), so setup feels
-# native rather than branded.
-theme        = "mica"
+# glass = frosted acrylic over the desktop, matching the other Fezcode installers.
+theme        = "glass"
 window_title = "Typewriter ${app.version} Setup"
 
 [install]
